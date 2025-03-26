@@ -20,8 +20,8 @@ class TaskRegistry():
     
     def register(self, name: str, task_class: VecEnv, env_cfg: LeggedRobotCfg, train_cfg: LeggedRobotCfgPPO):
         self.task_classes[name] = task_class
-        self.env_cfgs[name] = env_cfg
-        self.train_cfgs[name] = train_cfg
+        self.env_cfgs[name] = env_cfg # configurations of the environment
+        self.train_cfgs[name] = train_cfg # configurations of the training algorithm
     
     def get_task_class(self, name: str) -> VecEnv:
         return self.task_classes[name]
