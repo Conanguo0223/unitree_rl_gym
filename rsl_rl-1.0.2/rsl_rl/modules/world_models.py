@@ -6,10 +6,9 @@ from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange
 from torch.cuda.amp import autocast
 
-
-from rsl_rl.modules.functions_losses import SymLogTwoHotLoss
-from rsl_rl.modules.attention_blocks import get_subsequent_mask_with_batch_length, get_subsequent_mask
-from rsl_rl.modules.transformer_model import StochasticTransformerKVCache
+from sub_models.functions_losses import SymLogTwoHotLoss
+from sub_models.attention_blocks import get_subsequent_mask_with_batch_length, get_subsequent_mask
+from sub_models.transformer_model import StochasticTransformerKVCache
 import agents
 
 
