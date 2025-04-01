@@ -57,20 +57,29 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
         # transformer algorithm parameters
+    class twm():
         twm_max_len = 64
         twm_hidden_dim = 512
         twm_num_layers = 2
         twm_num_heads = 8
-        class Agent():
-            num_layers = 2
-            hidden_dim = 512
-            gamma = 0.985
-            Lambda = 0.95
-            entropyCoef = 3E-4
-        class Replaybuffer():
-            max_len = 100000
-            BufferWarmUp = 1024
-            ReplayBufferOnGPU = True
+        twm_train_steps = 2 # train the transformer per this many steps
+        batch_size = 16
+        batch_length = 16
+        demonstration_batch_size = 0 # batch size for external data
+        train_agent_steps = 1
+        train_tokenizer_times = 500
+        train_dynamic_times = 500
+        # class Agent():
+        #     num_layers = 2
+        #     hidden_dim = 512
+        #     gamma = 0.985
+        #     Lambda = 0.95
+        #     entropyCoef = 3E-4
+        #     use_context = False
+    class buffer():
+        max_len = 100000
+        BufferWarmUp = 1024
+        ReplayBufferOnGPU = True
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'rough_go2_TWM'
