@@ -418,6 +418,46 @@ class LeggedRobot(BaseTask):
         noise_vec[12+2*self.num_actions:12+3*self.num_actions] = 0. # previous actions
 
         return noise_vec
+    # ============custom functions===============
+    def sample_actions(self, conservative = True):
+        """
+        Samples random actions for the environment within the joint angle limits.
+        if Conservative flag is on, samples within the range of 0.5 to 1.5 times the default joint positions.
+
+        Returns:
+            torch.Tensor: A tensor of random actions with shape (num_envs, num_dof).
+        """
+        # Extract the lower and upper limits for each DOF
+        lower_limits = self.dof_pos_limits[:, 0]
+        upper_limits = self.dof_pos_limits[:, 1]
+
+        
+        if conservative:
+            random_actions = self.default_dof_pos * torch_rand_float(0.5, 1.5, (self.num_envs, self.num_dof), device=self.device)
+        else:
+            # Sample random actions uniformly within the limits for each DOF
+            random_values = torch.rand((self.num_envs, self.num_dof), device=self.device)
+            random_actions = lower_limits + random_values * (upper_limits - lower_limits)
+        return random_actions
+
+    def get_rewards(self):
+        """
+        Returns the current rewards for all environments.
+        """
+        self.compute_reward()
+        return self.rew_buf
+    
+    def get_dones(self):
+        """
+        Returns the current done flags for all environments.
+        """
+        return self.reset_buf
+    
+    def get_extra(self):
+        """
+        Returns the current extras dictionary containing additional information about the episode.
+        """
+        return self.extras
 
     #----------------------------------------
     def _init_buffers(self):
