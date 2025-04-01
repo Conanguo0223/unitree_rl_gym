@@ -116,9 +116,13 @@ class TaskRegistry():
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         
         train_cfg_dict = class_to_dict(train_cfg)
-        # runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-
-        runner = OnPolicy_WM_Runner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        # original runner
+        if "wm" not in name:
+            runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        else:
+            # world model runner 
+            runner = OnPolicy_WM_Runner(env, train_cfg_dict, log_dir, device=args.rl_device)
+        
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:
