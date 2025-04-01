@@ -39,9 +39,34 @@ import torch
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
+from rsl_rl.modules.sub_models.world_models import WorldModel
+from rsl_rl.modules.sub_models.functions_losses import symexp
+from rsl_rl.modules.sub_models.agents import ActorCriticAgent
+from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer
 
 
-class OnPolicyRunner:
+def build_world_model(in_channels, action_dim, alg_cfg):
+    return WorldModel(
+        in_channels=in_channels,
+        action_dim=action_dim,
+        transformer_max_length = alg_cfg["twm_max_len"],
+        transformer_hidden_dim = alg_cfg["twm_hidden_dim"],
+        transformer_num_layers = alg_cfg["twm_num_layers"],
+        transformer_num_heads = alg_cfg["twm_num_heads"]
+    ).cuda()
+
+def build_agent(alg_cfg, action_dim):
+    return ActorCriticAgent(
+        feat_dim = 32*32 + alg_cfg["twm_hidden_dim"],
+        num_layers = alg_cfg["Agent"]["num_layers"],
+        hidden_dim = alg_cfg["Agent"]["hidden_dim"],
+        action_dim = action_dim,
+        gamma = alg_cfg["Agent"]["gamma"],
+        lambd = alg_cfg["Agent"]["Lambda"],
+        entropy_coef = alg_cfg["Agent"]["entropyCoef"],
+    ).cuda()
+
+class OnPolicy_WM_Runner:
 
     def __init__(self,
                  env: VecEnv,
@@ -58,18 +83,20 @@ class OnPolicyRunner:
             num_critic_obs = self.env.num_privileged_obs 
         else:
             num_critic_obs = self.env.num_obs
-        actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
-        actor_critic: ActorCritic = actor_critic_class( self.env.num_obs,
-                                                        num_critic_obs,
-                                                        self.env.num_actions,
-                                                        **self.policy_cfg).to(self.device)
-        alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        
+        self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.alg_cfg)
+        self.agent = build_agent(self.alg_cfg, self.env.num_actions)
+        
+        self.replay_buffer = ReplayBuffer(
+            obs_shape = (num_critic_obs,),
+            num_envs = self.env.num_envs,
+            max_length = self.alg_cfg["Replaybuffer"]["max_len"],
+            warmup_length = self.alg_cfg["Replaybuffer"]["BufferWarmUp"],
+            store_on_gpu = self.alg_cfg["Replaybuffer"]["ReplayBufferOnGPU"]
+        )
+
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
-
-        # init storage and model
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions])
 
         # Log
         self.log_dir = log_dir
@@ -86,6 +113,7 @@ class OnPolicyRunner:
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
+        # get initial observations
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
         critic_obs = privileged_obs if privileged_obs is not None else obs

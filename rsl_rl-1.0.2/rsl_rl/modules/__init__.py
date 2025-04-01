@@ -30,3 +30,5 @@
 
 from .actor_critic import ActorCritic
 from .actor_critic_recurrent import ActorCriticRecurrent
+from .sub_models.functions_losses import symexp
+from .sub_models.world_models import WorldModel, MSELoss
