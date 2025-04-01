@@ -41,30 +41,30 @@ from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
 from rsl_rl.modules.sub_models.world_models import WorldModel
 from rsl_rl.modules.sub_models.functions_losses import symexp
-from rsl_rl.modules.sub_models.agents import ActorCriticAgent
+# from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer
 
 
-def build_world_model(in_channels, action_dim, alg_cfg):
+def build_world_model(in_channels, action_dim, twm_cfg):
     return WorldModel(
         in_channels=in_channels,
         action_dim=action_dim,
-        transformer_max_length = alg_cfg["twm_max_len"],
-        transformer_hidden_dim = alg_cfg["twm_hidden_dim"],
-        transformer_num_layers = alg_cfg["twm_num_layers"],
-        transformer_num_heads = alg_cfg["twm_num_heads"]
+        transformer_max_length = twm_cfg["twm_max_len"],
+        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
+        transformer_num_layers = twm_cfg["twm_num_layers"],
+        transformer_num_heads = twm_cfg["twm_num_heads"]
     ).cuda()
 
-def build_agent(alg_cfg, action_dim):
-    return ActorCriticAgent(
-        feat_dim = 32*32 + alg_cfg["twm_hidden_dim"],
-        num_layers = alg_cfg["Agent"]["num_layers"],
-        hidden_dim = alg_cfg["Agent"]["hidden_dim"],
-        action_dim = action_dim,
-        gamma = alg_cfg["Agent"]["gamma"],
-        lambd = alg_cfg["Agent"]["Lambda"],
-        entropy_coef = alg_cfg["Agent"]["entropyCoef"],
-    ).cuda()
+# def build_agent(alg_cfg, action_dim):
+#     return ActorCriticAgent(
+#         feat_dim = 32*32 + alg_cfg["twm_hidden_dim"],
+#         num_layers = alg_cfg["Agent"]["num_layers"],
+#         hidden_dim = alg_cfg["Agent"]["hidden_dim"],
+#         action_dim = action_dim,
+#         gamma = alg_cfg["Agent"]["gamma"],
+#         lambd = alg_cfg["Agent"]["Lambda"],
+#         entropy_coef = alg_cfg["Agent"]["entropyCoef"],
+#     ).cuda()
 
 class OnPolicy_WM_Runner:
 
@@ -77,6 +77,8 @@ class OnPolicy_WM_Runner:
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        self.rply_buff = train_cfg["buffer"]
+        self.twm_cfg = train_cfg["twm"]
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
@@ -84,19 +86,40 @@ class OnPolicy_WM_Runner:
         else:
             num_critic_obs = self.env.num_obs
         
-        self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.alg_cfg)
-        self.agent = build_agent(self.alg_cfg, self.env.num_actions)
-        
+        self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+        # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
+
+        # build Actor critic class
+        actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
+        actor_critic: ActorCritic = actor_critic_class( self.env.num_obs,
+                                                        num_critic_obs,
+                                                        self.env.num_actions,
+                                                        **self.policy_cfg).to(self.device)
+        alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
+        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+
+        # replay buffer for the world model
         self.replay_buffer = ReplayBuffer(
             obs_shape = (num_critic_obs,),
             num_envs = self.env.num_envs,
-            max_length = self.alg_cfg["Replaybuffer"]["max_len"],
-            warmup_length = self.alg_cfg["Replaybuffer"]["BufferWarmUp"],
-            store_on_gpu = self.alg_cfg["Replaybuffer"]["ReplayBufferOnGPU"]
+            max_length = self.rply_buff["max_len"],
+            warmup_length = self.rply_buff["BufferWarmUp"],
+            store_on_gpu = self.rply_buff["ReplayBufferOnGPU"]
         )
-
+        
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
+
+        # world model training parameters
+        self.train_dynamics_steps = self.twm_cfg["twm_train_steps"]
+        self.batch_size = self.twm_cfg["batch_size"]
+        self.batch_length = self.twm_cfg["batch_length"]
+        self.demonstration_batch_size = self.twm_cfg["demonstration_batch_size"]
+        self.train_agent_steps = self.twm_cfg["train_agent_steps"]
+        self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
+        self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
+        # init storage and model for the policy
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions])
 
         # Log
         self.log_dir = log_dir
@@ -104,6 +127,7 @@ class OnPolicy_WM_Runner:
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        self.log_movie_steps = 100
 
         _, _ = self.env.reset()
     
@@ -114,28 +138,51 @@ class OnPolicy_WM_Runner:
         if init_at_random_ep_len:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
         # get initial observations
+        # obs, privileged_obs, rewards, dones, infos
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
+        rewards = self.env.get_rewards()
+        dones = self.env.get_dones()
+        infos = self.env.get_extra()
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
-        self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+        # switch the agent to train mode
+        self.alg.actor_critic.train()
 
         ep_infos = []
-        rewbuffer = deque(maxlen=100)
-        lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        rewbuffer = deque(maxlen=100) # calculate mean reward 
+        lenbuffer = deque(maxlen=100) # calculate mean episode length
+        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current reward 
+        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current episode length
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
+        """
+        The learning algorithm roughly follow the following steps:
+        1. Collect num_steps_per_env steps of experience from the environment.
+        2. Update policy on environment data
+        3. Update world model
+        4. updated policy on imagined data generated from world model
+        """
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
-            # Rollout
+            # 1. Collect num_steps_per_env steps of experience from the environment.
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
-                    actions = self.alg.act(obs, critic_obs)
+                    # =============Sample Action=============
+                    if self.replay_buffer.ready() and self.alg_cfg["Agent"]["use_context"]:
+                        # if replay buffer ready and we want to use context to generate
+                        # we can have enough context to make WM predictions
+                        # TODO: actor that uses the context of environment length
+                        pass
+                    else:
+                        #if the agent is not using context, and replay is sufficient sample directly from the policy
+                        actions = self.alg.act(obs, critic_obs)
+                    
+                    # =============Step the environment=============
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                    
                     self.alg.process_env_step(rewards, dones, infos)
                     
                     if self.log_dir is not None:
@@ -157,9 +204,36 @@ class OnPolicy_WM_Runner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
             
+            # 2. Update policy on environment data
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start
+
+            # 3. Update world model
+            if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
+                for it_tok in range(self.train_tokenizer_times):
+                    # TODO: train tokenizer separately
+                    pass
+
+                for it_wm in range(self.train_dynamics_times):
+                    obs, action, reward, termination = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                    if it_wm < self.train_dynamics_times:
+                        self.worldmodel.update(obs, action, reward, termination, -1, logger=self.writer)
+                    else:
+                        # only log the final one
+                        self.worldmodel.update(obs, action, reward, termination, it, logger=self.writer)
+
+            # 4. update policy on imagined data generated from world model
+            if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
+                if it % self.log_movie_steps == 0:
+                    # TODO: write log video in legged gym
+                    log_video = True
+                else:
+                    log_video = False
+                
+                pass
+
+
             if self.log_dir is not None:
                 self.log(locals())
             if it % self.save_interval == 0:
