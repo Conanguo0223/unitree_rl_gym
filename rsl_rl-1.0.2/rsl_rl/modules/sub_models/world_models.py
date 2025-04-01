@@ -5,6 +5,7 @@ from torch.distributions import OneHotCategorical, Normal
 from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange
 from torch.cuda.amp import autocast
+from torch.utils.tensorboard import SummaryWriter
 
 from .functions_losses import SymLogTwoHotLoss
 from .attention_blocks import get_subsequent_mask_with_batch_length, get_subsequent_mask
@@ -375,7 +376,7 @@ class WorldModel(nn.Module):
 
         return torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1), self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
 
-    def update(self, obs, action, reward, termination, logger=None):
+    def update(self, obs, action, reward, termination, it, writer: SummaryWriter):
         self.train()
         batch_size, batch_length = obs.shape[:2]
 
@@ -414,12 +415,12 @@ class WorldModel(nn.Module):
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
 
-        if logger is not None:
-            logger.log("WorldModel/reconstruction_loss", reconstruction_loss.item())
-            logger.log("WorldModel/reward_loss", reward_loss.item())
-            logger.log("WorldModel/termination_loss", termination_loss.item())
-            logger.log("WorldModel/dynamics_loss", dynamics_loss.item())
-            logger.log("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.item())
-            logger.log("WorldModel/representation_loss", representation_loss.item())
-            logger.log("WorldModel/representation_real_kl_div", representation_real_kl_div.item())
-            logger.log("WorldModel/total_loss", total_loss.item())
+        if writer is not None and it > 0:
+            writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/reward_loss", reward_loss.item(), it)
+            writer.add_scalar("WorldModel/termination_loss", termination_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_loss", dynamics_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.item(), it)
+            writer.add_scalar("WorldModel/representation_loss", representation_loss.item(), it)
+            writer.add_scalar("WorldModel/representation_real_kl_div", representation_real_kl_div.item(), it)
+            writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
