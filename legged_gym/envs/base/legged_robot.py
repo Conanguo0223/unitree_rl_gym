@@ -21,7 +21,7 @@ from .legged_robot_config import LeggedRobotCfg
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: LeggedRobotCfg, sim_params, physics_engine, sim_device, headless):
         """ Parses the provided config file,
-            calls create_sim() (which creates, simulation and environments),
+            calls create_sim() (which creates, simulation, terrain and environments),
             initilizes pytorch buffers used during training
 
         Args:
@@ -190,6 +190,16 @@ class LeggedRobot(BaseTask):
                                     self.dof_vel * self.obs_scales.dof_vel,
                                     self.actions
                                     ),dim=-1)
+        self.privileged_obs_buf = torch.cat((self.base_pos * self.obs_scales.base_pos,
+                                             self.base_quat * self.obs_scales.base_quat,
+                                             self.base_lin_vel * self.obs_scales.base_lin_vel,
+                                             self.base_ang_vel * self.obs_scales.base_ang_vel,
+                                             self.projected_gravity,
+                                             self.commands[:, :3] * self.commands_scale,
+                                             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                                             self.dof_vel * self.obs_scales.dof_vel,
+                                             self.actions
+                                             ), dim=-1)
         # add perceptive inputs if not blind
         # add noise if needed
         if self.add_noise:

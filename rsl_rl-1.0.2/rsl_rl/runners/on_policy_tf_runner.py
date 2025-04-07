@@ -42,7 +42,7 @@ from rsl_rl.env import VecEnv
 from rsl_rl.modules.sub_models.world_models import WorldModel
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
-from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer
+from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq
 
 
 def build_world_model(in_channels, action_dim, twm_cfg):
@@ -82,33 +82,36 @@ class OnPolicy_WM_Runner:
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
-            num_critic_obs = self.env.num_privileged_obs 
+            self.num_critic_obs = self.env.num_privileged_obs 
         else:
-            num_critic_obs = self.env.num_obs
-        
+            self.num_critic_obs = self.env.num_obs
         self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
         actor_critic_class = eval(self.cfg["policy_class_name"]) # ActorCritic
         actor_critic: ActorCritic = actor_critic_class( self.env.num_obs,
-                                                        num_critic_obs,
+                                                        self.num_critic_obs,
                                                         self.env.num_actions,
                                                         **self.policy_cfg).to(self.device)
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
 
-        # replay buffer for the world model
-        self.replay_buffer = ReplayBuffer(
-            obs_shape = (num_critic_obs,),
+        # bigger replay buffer for the world model
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.save_interval = self.cfg["save_interval"] 
+        self.replay_buffer = ReplayBuffer_seq(
+            obs_shape = (self.env.num_obs,),
+            priv_obs_shape = (self.num_critic_obs,),
+            action_shape=(self.env.num_actions,),
+            num_steps_per_env = self.num_steps_per_env,
             num_envs = self.env.num_envs,
             max_length = self.rply_buff["max_len"],
             warmup_length = self.rply_buff["BufferWarmUp"],
             store_on_gpu = self.rply_buff["ReplayBufferOnGPU"]
         )
         
-        self.num_steps_per_env = self.cfg["num_steps_per_env"]
-        self.save_interval = self.cfg["save_interval"]
+        
 
         # world model training parameters
         self.train_dynamics_steps = self.twm_cfg["twm_train_steps"]
@@ -167,6 +170,11 @@ class OnPolicy_WM_Runner:
             start = time.time()
             # 1. Collect num_steps_per_env steps of experience from the environment.
             with torch.inference_mode():
+                obs_buf = []
+                privileged_obs_buf = []
+                actions_buf = []
+                reward_buf = []
+                dones_buf = []
                 for i in range(self.num_steps_per_env):
                     # =============Sample Action=============
                     if self.replay_buffer.ready() and self.alg_cfg["Agent"]["use_context"]:
@@ -183,8 +191,23 @@ class OnPolicy_WM_Runner:
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                     
+                    # =============Store in replay buffer=============                    
+                    # save rewards and dones to the internal buffer for policy update
                     self.alg.process_env_step(rewards, dones, infos)
-                    
+                    # save the experience to the replay buffer for world model training
+                    # there could be different types for saving the experience
+                    # aggregated, or not aggregated
+                    obs_buf.append(obs)
+                    privileged_obs_buf.append(privileged_obs)
+                    actions_buf.append(actions)
+                    reward_buf.append(rewards)
+                    dones_buf.append(dones)
+                    # the aggregated shape of these are 
+                    # buf: (num_steps_per_env, num_envs, ...)
+                    # during training, transformer should sample from the buffer with samples like
+                    # sample: (batch_size, num_steps_per_env, ...)
+
+                    # =============Book keeping=============
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
@@ -196,6 +219,14 @@ class OnPolicy_WM_Runner:
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
+
+                # save the experience to the replay buffer
+                obs_buf = torch.stack(obs_buf, dim=0)
+                privileged_obs_buf = torch.stack(privileged_obs_buf, dim=0)
+                actions_buf = torch.stack(actions_buf, dim=0)
+                reward_buf = torch.stack(reward_buf, dim=0)
+                dones_buf = torch.stack(dones_buf, dim=0)
+                self.replay_buffer.append(obs_buf, privileged_obs_buf, actions_buf, reward_buf, dones_buf)
 
                 stop = time.time()
                 collection_time = stop - start
