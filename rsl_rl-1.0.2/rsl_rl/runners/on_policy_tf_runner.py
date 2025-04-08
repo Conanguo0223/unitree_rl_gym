@@ -35,7 +35,7 @@ import statistics
 
 from torch.utils.tensorboard import SummaryWriter
 import torch
-
+from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
@@ -144,7 +144,7 @@ class OnPolicy_WM_Runner:
         # obs, privileged_obs, rewards, dones, infos
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
-        rewards = self.env.get_rewards()
+        
         dones = self.env.get_dones()
         infos = self.env.get_extra()
         critic_obs = privileged_obs if privileged_obs is not None else obs
@@ -171,7 +171,7 @@ class OnPolicy_WM_Runner:
             # 1. Collect num_steps_per_env steps of experience from the environment.
             with torch.inference_mode():
                 obs_buf = []
-                privileged_obs_buf = []
+                critic_obs_buf = []
                 actions_buf = []
                 reward_buf = []
                 dones_buf = []
@@ -198,10 +198,11 @@ class OnPolicy_WM_Runner:
                     # there could be different types for saving the experience
                     # aggregated, or not aggregated
                     obs_buf.append(obs)
-                    privileged_obs_buf.append(privileged_obs)
+                    critic_obs_buf.append(critic_obs)
                     actions_buf.append(actions)
                     reward_buf.append(rewards)
                     dones_buf.append(dones)
+                    
                     # the aggregated shape of these are 
                     # buf: (num_steps_per_env, num_envs, ...)
                     # during training, transformer should sample from the buffer with samples like
@@ -222,11 +223,18 @@ class OnPolicy_WM_Runner:
 
                 # save the experience to the replay buffer
                 obs_buf = torch.stack(obs_buf, dim=0)
-                privileged_obs_buf = torch.stack(privileged_obs_buf, dim=0)
+                critic_obs_buf = torch.stack(critic_obs_buf, dim=0)
                 actions_buf = torch.stack(actions_buf, dim=0)
                 reward_buf = torch.stack(reward_buf, dim=0)
                 dones_buf = torch.stack(dones_buf, dim=0)
-                self.replay_buffer.append(obs_buf, privileged_obs_buf, actions_buf, reward_buf, dones_buf)
+
+                # rearrange the buffer to be (num_envs, num_steps_per_env, ...)
+                obs_buf = rearrange(obs_buf,"T N F -> N T F")
+                critic_obs_buf = rearrange(critic_obs_buf,"T N F -> N T F")
+                actions_buf = rearrange(actions_buf,"T N A -> N T A")
+                reward_buf = rearrange(reward_buf,"T N -> N T")
+                dones_buf = rearrange(dones_buf,"T N -> N T")
+                self.replay_buffer.append(obs_buf, critic_obs_buf, actions_buf, reward_buf, dones_buf)
 
                 stop = time.time()
                 collection_time = stop - start
@@ -242,20 +250,27 @@ class OnPolicy_WM_Runner:
 
             # 3. Update world model
             if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
+                # 3-1 train tokenizer
                 for it_tok in range(self.train_tokenizer_times):
-                    # TODO: train tokenizer separately
-                    pass
-
-                for it_wm in range(self.train_dynamics_times):
-                    obs, action, reward, termination = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
-                    if it_wm < self.train_dynamics_times:
-                        self.worldmodel.update(obs, action, reward, termination, -1, logger=self.writer)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                    if it_tok < self.train_tokenizer_times:
+                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, logger=self.writer)
                     else:
                         # only log the final one
-                        self.worldmodel.update(obs, action, reward, termination, it, logger=self.writer)
+                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, logger=self.writer)
+                
+                # 3-2 train dynamics
+                for it_wm in range(self.train_dynamics_times):
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                    if it_wm < self.train_dynamics_times:
+                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, logger=self.writer)
+                    else:
+                        # only log the final one
+                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, logger=self.writer)
 
             # 4. update policy on imagined data generated from world model
             if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
+                # 4-1 
                 if it % self.log_movie_steps == 0:
                     # TODO: write log video in legged gym
                     log_video = True

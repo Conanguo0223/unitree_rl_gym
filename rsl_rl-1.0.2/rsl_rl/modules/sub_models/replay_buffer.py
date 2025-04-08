@@ -29,6 +29,7 @@ class ReplayBuffer():
         self.max_length = max_length
         self.warmup_length = warmup_length
         self.external_buffer_length = None
+        self.full = False
 
     # def load_trajectory(self, path):
     #     buffer = pickle.load(open(path, "rb"))
@@ -148,7 +149,8 @@ class ReplayBuffer_seq():
         self.warmup_length = warmup_length
         self.external_buffer_length = None
         self.num_steps_per_env = num_steps_per_env
-
+        self.full = False
+        
     def ready(self):
         return self.length * self.num_envs > self.warmup_length
 

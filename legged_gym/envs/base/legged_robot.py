@@ -469,6 +469,47 @@ class LeggedRobot(BaseTask):
             noise_vec[48:235] = noise_scales.height_measurements* noise_level * self.obs_scales.height_measurements
         return noise_vec
 
+    # ============custom functions===============
+    def sample_actions(self, conservative = True):
+        """
+        Samples random actions for the environment within the joint angle limits.
+        if Conservative flag is on, samples within the range of 0.5 to 1.5 times the default joint positions.
+
+        Returns:
+            torch.Tensor: A tensor of random actions with shape (num_envs, num_dof).
+        """
+        # Extract the lower and upper limits for each DOF
+        lower_limits = self.dof_pos_limits[:, 0]
+        upper_limits = self.dof_pos_limits[:, 1]
+
+        
+        if conservative:
+            random_actions = self.default_dof_pos * torch_rand_float(0.5, 1.5, (self.num_envs, self.num_dof), device=self.device)
+        else:
+            # Sample random actions uniformly within the limits for each DOF
+            random_values = torch.rand((self.num_envs, self.num_dof), device=self.device)
+            random_actions = lower_limits + random_values * (upper_limits - lower_limits)
+        return random_actions
+
+    def get_rewards(self):
+        """
+        Returns the current rewards for all environments.
+        """
+        self.compute_reward()
+        return self.rew_buf
+    
+    def get_dones(self):
+        """
+        Returns the current done flags for all environments.
+        """
+        return self.reset_buf
+    
+    def get_extra(self):
+        """
+        Returns the current extras dictionary containing additional information about the episode.
+        """
+        return self.extras
+
     #----------------------------------------
     def _init_buffers(self):
         """ Initialize torch tensors which will contain simulation states and processed quantities
@@ -487,12 +528,24 @@ class LeggedRobot(BaseTask):
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]
         self.base_quat = self.root_states[:, 3:7]
+        self.rpy = get_euler_xyz_in_tensor(self.base_quat)
+        self.base_pos = self.root_states[:self.num_envs, 0:3]
 
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
 
         # initialize some data used later on
         self.common_step_counter = 0
         self.extras = {}
+        if self.cfg.terrain.measure_heights:
+            self.height_points = self._init_height_points()
+        if not self.cfg.terrain.measure_heights:
+            y = torch.tensor(self.cfg.terrain.measured_points_y, device=self.device, requires_grad=False)
+            x = torch.tensor(self.cfg.terrain.measured_points_x, device=self.device, requires_grad=False)
+            grid_x, _ = torch.meshgrid(x, y)
+            self.num_height_points = grid_x.numel()
+            self.num_obs = self.num_obs - self.num_height_points
+            self.obs_buf = torch.zeros(self.num_envs, self.num_obs, device=self.device, dtype=torch.float)
+
         self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
         self.gravity_vec = to_torch(get_axis_params(-1., self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
         self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))
@@ -510,8 +563,7 @@ class LeggedRobot(BaseTask):
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
-        if self.cfg.terrain.measure_heights:
-            self.height_points = self._init_height_points()
+        
         self.measured_heights = 0
 
         # joint positions offsets and PD gains
