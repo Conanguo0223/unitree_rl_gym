@@ -66,6 +66,19 @@ def build_world_model(in_channels, action_dim, twm_cfg):
 #         entropy_coef = alg_cfg["Agent"]["entropyCoef"],
 #     ).cuda()
 
+
+def imagine_one_step(worldmodel: WorldModel, sample_obs, sample_action):
+    # use the observations sampled from the replay buffer to generate the next observation
+    # sample_obs: (batch_size, num_steps, num_envs, num_obs)
+    context_latent_flattened = worldmodel.encode_obs(sample_obs) # flattend latent
+    for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
+        last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = worldmodel.predict_next(
+            context_latent_flattened[:, i:i+1],
+            sample_action[:, i:i+1],
+            log_video=False
+        )
+
+
 class OnPolicy_WM_Runner:
 
     def __init__(self,
@@ -99,6 +112,7 @@ class OnPolicy_WM_Runner:
 
         # bigger replay buffer for the world model
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.imagination_horizon = self.policy_cfg["imagination_horizon"]
         self.save_interval = self.cfg["save_interval"] 
         self.replay_buffer = ReplayBuffer_seq(
             obs_shape = (self.env.num_obs,),
@@ -193,7 +207,7 @@ class OnPolicy_WM_Runner:
                     
                     # =============Store in replay buffer=============                    
                     # save rewards and dones to the internal buffer for policy update
-                    self.alg.process_env_step(rewards, dones, infos)
+                    self.alg.process_env_step(rewards, dones, infos,imagine=False)
                     # save the experience to the replay buffer for world model training
                     # there could be different types for saving the experience
                     # aggregated, or not aggregated
@@ -247,38 +261,73 @@ class OnPolicy_WM_Runner:
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
             learn_time = stop - start
+            # =============end update policy=============
 
+
+            start = stop
             # 3. Update world model
             if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
                 # 3-1 train tokenizer
                 for it_tok in range(self.train_tokenizer_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                    # (batch, time, feature)
                     if it_tok < self.train_tokenizer_times:
-                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, logger=self.writer)
+                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:
                         # only log the final one
-                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, logger=self.writer)
+                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
                 
                 # 3-2 train dynamics
                 for it_wm in range(self.train_dynamics_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
                     if it_wm < self.train_dynamics_times:
-                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, logger=self.writer)
+                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:
                         # only log the final one
-                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, logger=self.writer)
+                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+            stop = time.time()
+            learn_WM_time = stop - start
+            # =============end updating world model=============            
 
+            start = stop
             # 4. update policy on imagined data generated from world model
             if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
-                # 4-1 
+                # 4-1 imagine data
+                for it_im in range(self.train_agent_steps):
+                    with torch.inference_mode():
+                        # sample actual experience from replay buffer
+                        obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                        
+                        # rollout the world model
+                        for imag_step in range(self.imagination_horizon):
+                            # sample action from the policy
+                            actions = self.alg.act(obs_sample, critic_obs_sample)
+                            
+                            # use the sampled action to do roll outs in the world model
+                            obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.worldmodel.imagine_data(obs_sample, action_sample, reward_sample, termination_sample, imag_step)
+
+                            # update the policy with the imagined data
+                            self.alg.process_env_step(reward_sample, termination_sample, infos, imagine=True)
+                        
+                        self.alg.compute_returns(critic_obs)
+
+                    # 4-2 update the policy
+                    mean_value_loss, mean_surrogate_loss = self.alg.update()
+                    stop = time.time()
+                    learn_time = stop - start
+
+
+                # TODO: write log video in legged gym
                 if it % self.log_movie_steps == 0:
-                    # TODO: write log video in legged gym
                     log_video = True
                 else:
                     log_video = False
                 
                 pass
-
+            
+            stop = time.time()
+            learn_policy_w_WM_time = stop - start
+            # =============end update policy on imagined data============= 
 
             if self.log_dir is not None:
                 self.log(locals())

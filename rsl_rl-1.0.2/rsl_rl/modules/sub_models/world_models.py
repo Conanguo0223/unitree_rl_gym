@@ -14,44 +14,65 @@ from .agents import ActorCriticAgent
 
 
 class EncoderBN(nn.Module):
-    def __init__(self, in_channels, stem_channels, final_feature_width) -> None:
+    def __init__(self, in_features, stem_channels, feature_depth) -> None:
         super().__init__()
-
+        # stem_channels = 32
+        # final_feature_layers = 4
+        # self.type = "conv"
+        self.type = "linear"
         backbone = []
         # stem
-        backbone.append(
-            nn.Conv2d(
-                in_channels=in_channels,
-                out_channels=stem_channels,
-                kernel_size=4,
-                stride=2,
-                padding=1,
-                bias=False
-            )
-        )
-        feature_width = 64//2
-        channels = stem_channels
-        backbone.append(nn.BatchNorm2d(stem_channels))
-        backbone.append(nn.ReLU(inplace=True))
-
-        # layers
-        while True:
+        if self.type == "linear":
             backbone.append(
-                nn.Conv2d(
-                    in_channels=channels,
-                    out_channels=channels*2,
+                nn.Linear(
+                    in_features= in_features, 
+                    out_features=stem_channels,
+                    bias=False
+                )
+        )
+        if self.type == "conv":
+            backbone.append(
+                nn.Conv1d(
+                    in_channels=in_features,
+                    out_channels=stem_channels,
                     kernel_size=4,
                     stride=2,
                     padding=1,
                     bias=False
                 )
             )
+        feature_layers = feature_depth
+        channels = stem_channels
+        backbone.append(nn.BatchNorm1d(stem_channels))
+        backbone.append(nn.ReLU(inplace=True))
+
+        # layers
+        while True:
+            if self.type == "linear":
+                backbone.append(
+                    nn.Linear(
+                        in_features=channels,
+                        out_features=channels*2,
+                        bias=False
+                    )
+                )
+            if self.type == "conv":
+                backbone.append(
+                    nn.Conv1d(
+                        in_channels=channels,
+                        out_channels=channels*2,
+                        kernel_size=4,
+                        stride=2,
+                        padding=1,
+                        bias=False
+                    )
+                )
             channels *= 2
-            feature_width //= 2
-            backbone.append(nn.BatchNorm2d(channels))
+            feature_layers -= 1
+            backbone.append(nn.BatchNorm1d(channels))
             backbone.append(nn.ReLU(inplace=True))
 
-            if feature_width == final_feature_width:
+            if feature_layers == 0:
                 break
 
         self.backbone = nn.Sequential(*backbone)
@@ -59,60 +80,132 @@ class EncoderBN(nn.Module):
 
     def forward(self, x):
         batch_size = x.shape[0]
-        x = rearrange(x, "B L C H W -> (B L) C H W")
+        x = rearrange(x, "B T F -> (B T) F")
         x = self.backbone(x)
-        x = rearrange(x, "(B L) C H W -> B L (C H W)", B=batch_size)
+        x = rearrange(x, "(B T) F -> B T F", B=batch_size)
         return x
 
+class VectorQuantizer(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost):
+        """
+        Vector Quantizer for VQ-VAE.
+
+        Args:
+            num_embeddings (int): Number of embedding vectors in the codebook.
+            embedding_dim (int): Dimensionality of each embedding vector.
+            commitment_cost (float): Weight for the commitment loss.
+        """
+        super(VectorQuantizer, self).__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.commitment_cost = commitment_cost
+
+        # Initialize the embedding table
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+        self.embedding.weight.data.uniform_(-1 / num_embeddings, 1 / num_embeddings)
+
+    def forward(self, inputs):
+        """
+        Forward pass for vector quantization.
+
+        Args:
+            inputs (torch.Tensor): Input tensor of shape (batch_size, embedding_dim, ...).
+
+        Returns:
+            quantized (torch.Tensor): Quantized tensor of the same shape as inputs.
+            loss (torch.Tensor): Commitment loss.
+            indices (torch.Tensor): Indices of the closest embeddings.
+        """
+        # Flatten input to (batch_size * ..., embedding_dim)
+        flat_inputs = inputs.view(-1, self.embedding_dim)
+
+        # Compute distances to embedding vectors
+        distances = (
+            (flat_inputs ** 2).sum(dim=1, keepdim=True)
+            - 2 * torch.matmul(flat_inputs, self.embedding.weight.T)
+            + (self.embedding.weight ** 2).sum(dim=1)
+        )
+
+        # Find the closest embedding for each input
+        indices = torch.argmin(distances, dim=1)
+        quantized = self.embedding(indices).view_as(inputs)
+
+        # Compute commitment loss
+        e_latent_loss = F.mse_loss(quantized.detach(), inputs)
+        q_latent_loss = F.mse_loss(quantized, inputs.detach())
+        loss = q_latent_loss + self.commitment_cost * e_latent_loss
+
+        # Straight-through gradient estimator
+        quantized = inputs + (quantized - inputs).detach()
+
+        return quantized, loss, indices
 
 class DecoderBN(nn.Module):
-    def __init__(self, stoch_dim, last_channels, original_in_channels, stem_channels, final_feature_width) -> None:
+    def __init__(self, stoch_dim, last_channels, original_in_channels, stem_channels, feature_depth) -> None:
         super().__init__()
-
+        self.type = "linear"
+        # self.type = "conv"
         backbone = []
         # stem
-        backbone.append(nn.Linear(stoch_dim, last_channels*final_feature_width*final_feature_width, bias=False))
-        backbone.append(Rearrange('B L (C H W) -> (B L) C H W', C=last_channels, H=final_feature_width))
-        backbone.append(nn.BatchNorm2d(last_channels))
+        backbone.append(nn.Linear(stoch_dim, last_channels, bias=False))
+        backbone.append(Rearrange('B L F -> (B L) F', F=last_channels))
+        backbone.append(nn.BatchNorm1d(last_channels))
         backbone.append(nn.ReLU(inplace=True))
         # residual_layer
         # backbone.append(ResidualStack(last_channels, 1, last_channels//4))
         # layers
         channels = last_channels
-        feat_width = final_feature_width
+        feat_width = feature_depth
         while True:
             if channels == stem_channels:
                 break
+            if self.type == "linear":
+                backbone.append(
+                    nn.Linear(
+                        in_features=channels,
+                        out_features=channels//2,
+                        bias=False
+                    )
+                )
+            if self.type == "conv":
+                backbone.append(
+                    nn.ConvTranspose1d(
+                        in_channels=channels,
+                        out_channels=channels//2,
+                        kernel_size=4,
+                        stride=2,
+                        padding=1,
+                        bias=False
+                    )
+                )
+            channels //= 2
+            feat_width *= 2
+            backbone.append(nn.BatchNorm1d(channels))
+            backbone.append(nn.ReLU(inplace=True))
+        if self.type == "linear":
             backbone.append(
-                nn.ConvTranspose2d(
-                    in_channels=channels,
-                    out_channels=channels//2,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1,
+                nn.Linear(
+                    in_features=channels,
+                    out_features=original_in_channels,
                     bias=False
                 )
             )
-            channels //= 2
-            feat_width *= 2
-            backbone.append(nn.BatchNorm2d(channels))
-            backbone.append(nn.ReLU(inplace=True))
-
-        backbone.append(
-            nn.ConvTranspose2d(
-                in_channels=channels,
-                out_channels=original_in_channels,
-                kernel_size=4,
-                stride=2,
-                padding=1
+        if self.type == "conv":
+            backbone.append(
+                nn.ConvTranspose1d(
+                    in_channels=channels,
+                    out_channels=original_in_channels,
+                    kernel_size=4,
+                    stride=2,
+                    padding=1
+                )
             )
-        )
         self.backbone = nn.Sequential(*backbone)
 
     def forward(self, sample):
-        batch_size = sample.shape[0]
+        batch_size = sample.shape[0] # B L (K C)
         obs_hat = self.backbone(sample)
-        obs_hat = rearrange(obs_hat, "(B L) C H W -> B L C H W", B=batch_size)
+        obs_hat = rearrange(obs_hat, "(B L) F -> B L F", B=batch_size)
         return obs_hat
 
 
@@ -162,6 +255,8 @@ class RewardDecoder(nn.Module):
     def forward(self, feat):
         feat = self.backbone(feat)
         reward = self.head(feat)
+        # squeeze reward
+        reward = reward.squeeze(-1) # remove last 1 dim
         return reward
 
 
@@ -194,7 +289,7 @@ class MSELoss(nn.Module):
 
     def forward(self, obs_hat, obs):
         loss = (obs_hat - obs)**2
-        loss = reduce(loss, "B L C H W -> B L", "sum")
+        loss = reduce(loss, "B L F -> B L", "sum")
         return loss.mean()
 
 
@@ -219,7 +314,7 @@ class WorldModel(nn.Module):
                  transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
         super().__init__()
         self.transformer_hidden_dim = transformer_hidden_dim
-        self.final_feature_width = 4
+        self.feature_depth = 4
         self.stoch_dim = 32
         self.stoch_flattened_dim = self.stoch_dim*self.stoch_dim
         self.use_amp = True
@@ -228,9 +323,9 @@ class WorldModel(nn.Module):
         self.imagine_batch_length = -1
 
         self.encoder = EncoderBN(
-            in_channels=in_channels,
+            in_features=in_channels,
             stem_channels=32,
-            final_feature_width=self.final_feature_width
+            feature_depth=self.feature_depth
         )
         self.storm_transformer = StochasticTransformerKVCache(
             stoch_dim=self.stoch_flattened_dim,
@@ -242,7 +337,7 @@ class WorldModel(nn.Module):
             dropout=0.1
         )
         self.dist_head = DistHead(
-            image_feat_dim=self.encoder.last_channels*self.final_feature_width*self.final_feature_width,
+            image_feat_dim=self.encoder.last_channels,
             transformer_hidden_dim=transformer_hidden_dim,
             stoch_dim=self.stoch_dim
         )
@@ -251,10 +346,10 @@ class WorldModel(nn.Module):
             last_channels=self.encoder.last_channels,
             original_in_channels=in_channels,
             stem_channels=32,
-            final_feature_width=self.final_feature_width
+            feature_depth=self.feature_depth
         )
         self.reward_decoder = RewardDecoder(
-            num_classes=255,
+            num_classes=1,
             embedding_size=self.stoch_flattened_dim,
             transformer_hidden_dim=transformer_hidden_dim
         )
@@ -263,7 +358,8 @@ class WorldModel(nn.Module):
             transformer_hidden_dim=transformer_hidden_dim
         )
 
-        self.mse_loss_func = MSELoss()
+        self.mse_loss_func_obs = MSELoss()
+        self.mse_loss = nn.MSELoss(reduction='sum')
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
         self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
@@ -400,9 +496,10 @@ class WorldModel(nn.Module):
             termination_hat = self.termination_decoder(dist_feat)
 
             # env loss
-            reconstruction_loss = self.mse_loss_func(obs_hat, obs)
-            reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination)
+            reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
+            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
+            reward_loss = self.mse_loss(reward_hat, reward)
+            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
             # dyn-rep loss
             dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
             representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
@@ -450,9 +547,10 @@ class WorldModel(nn.Module):
             termination_hat = self.termination_decoder(dist_feat)
 
             # env loss
-            reconstruction_loss = self.mse_loss_func(obs_hat, obs)
-            reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination)
+            reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
+            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
+            reward_loss = self.mse_loss(reward_hat, reward)
+            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
             total_loss = reconstruction_loss + reward_loss + termination_loss
             # # dyn-rep loss
             # dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])

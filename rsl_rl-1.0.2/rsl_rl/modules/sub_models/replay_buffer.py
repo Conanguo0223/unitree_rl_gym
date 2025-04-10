@@ -178,11 +178,13 @@ class ReplayBuffer_seq():
         if self.store_on_gpu:
             if end_index > self.actual_max_length:
                 overflow = end_index - self.actual_max_length
+                # store the buffer from current_index~end with obs from 0~batch_size-overflow
                 self.obs_buffer[self.current_index:] = obs[:batch_size-overflow]
                 self.priv_obs_buffer[self.current_index:] = priv_obs[:batch_size-overflow]
                 self.action_buffer[self.current_index:] = action[:batch_size-overflow]
                 self.reward_buffer[self.current_index:] = reward[:batch_size-overflow]
                 self.termination_buffer[self.current_index:] = termination[:batch_size-overflow]
+                # store the buffer from 0~overflow with obs from batch_size-overflow~end
                 self.obs_buffer[:overflow] = obs[batch_size-overflow:]
                 self.priv_obs_buffer[:overflow] = priv_obs[batch_size-overflow:]
                 self.action_buffer[:overflow] = action[batch_size-overflow:]
@@ -213,10 +215,13 @@ class ReplayBuffer_seq():
                 self.action_buffer[self.current_index:end_index] = action
                 self.reward_buffer[self.current_index:end_index] = reward
                 self.termination_buffer[self.current_index:end_index] = termination
-
-        self.current_index = end_index % self.actual_max_length
+        self.current_index += batch_size
         if end_index >= self.actual_max_length:
+            self.current_index = end_index % self.actual_max_length
             self.full = True
+
+        if len(self) < self.max_length:
+            self.length += 1
 
     def __len__(self):
         return self.actual_max_length if self.full else self.current_index

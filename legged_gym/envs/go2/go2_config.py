@@ -57,6 +57,9 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
         # transformer algorithm parameters
+
+    class policy( LeggedRobotCfgPPO.policy ):
+        imagination_horizon = 16
     class twm():
         twm_max_len = 64
         twm_hidden_dim = 512
@@ -77,8 +80,8 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
         #     entropyCoef = 3E-4
         #     use_context = False
     class buffer():
-        max_len = 100000
-        BufferWarmUp = 1024
+        max_len = 10000
+        BufferWarmUp = 128
         ReplayBufferOnGPU = True
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
