@@ -72,6 +72,7 @@ def imagine_one_step(worldmodel: WorldModel, sample_obs, sample_action):
     # sample_obs: (batch_size, num_steps, num_envs, num_obs)
     context_latent_flattened = worldmodel.encode_obs(sample_obs) # flattend latent
     for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
+        # remember to turn the model to eval mode
         last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = worldmodel.predict_next(
             context_latent_flattened[:, i:i+1],
             sample_action[:, i:i+1],

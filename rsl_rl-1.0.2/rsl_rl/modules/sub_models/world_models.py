@@ -362,7 +362,7 @@ class WorldModel(nn.Module):
         self.mse_loss = nn.MSELoss(reduction='sum')
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
-        self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
+        # self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
         self.categorical_kl_div_loss = CategoricalKLDivLossWithFreeBits(free_bits=1)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
@@ -398,7 +398,7 @@ class WorldModel(nn.Module):
             else:
                 obs_hat = None
             reward_hat = self.reward_decoder(dist_feat)
-            reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
+            # reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
             termination_hat = self.termination_decoder(dist_feat)
             termination_hat = termination_hat > 0
 
