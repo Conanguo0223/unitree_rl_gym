@@ -101,3 +101,19 @@ class StochasticTransformerKVCache(nn.Module):
             feats, attn = layer(feats, self.kv_cache_list[idx], self.kv_cache_list[idx], mask)
 
         return feats
+
+    def forward_context(self, samples, action, mask):
+        '''
+        Normal forward pass that returns the kv_cache of the context
+        '''
+        # action is not one hot
+        # action = F.one_hot(action.long(), self.action_dim).float() 
+        feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.position_encoding(feats)
+        feats = self.layer_norm(feats)
+
+        for idx, layer in enumerate(self.layer_stack):
+            self.kv_cache_list[idx] = torch.cat([self.kv_cache_list[idx], feats], dim=1)
+            feats, attn = layer(feats, feats, feats, mask)
+        
+        return feats

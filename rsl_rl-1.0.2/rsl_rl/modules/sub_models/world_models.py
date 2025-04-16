@@ -321,7 +321,7 @@ class WorldModel(nn.Module):
         self.tensor_dtype = torch.bfloat16 if self.use_amp else torch.float32
         self.imagine_batch_size = -1
         self.imagine_batch_length = -1
-
+        self.in_channels = in_channels
         self.encoder = EncoderBN(
             in_features=in_channels,
             stem_channels=32,
@@ -387,14 +387,14 @@ class WorldModel(nn.Module):
 
     def predict_next(self, last_flattened_sample, action, log_video=True):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            dist_feat = self.storm_transformer.forward_with_kv_cache(last_flattened_sample, action)
-            prior_logits = self.dist_head.forward_prior(dist_feat)
+            dist_feat = self.storm_transformer.forward_with_kv_cache(last_flattened_sample, action)# transformer features
+            prior_logits = self.dist_head.forward_prior(dist_feat) # 
 
             # decoding
             prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
-            prior_flattened_sample = self.flatten_sample(prior_sample)
+            prior_flattened_sample = self.flatten_sample(prior_sample) # the output from transformer to predict the next observation
             if log_video:
-                obs_hat = self.image_decoder(prior_flattened_sample)
+                obs_hat = self.image_decoder(prior_flattened_sample) # predicted next observation
             else:
                 obs_hat = None
             reward_hat = self.reward_decoder(dist_feat)
@@ -426,12 +426,17 @@ class WorldModel(nn.Module):
             print(f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}")
             self.imagine_batch_size = imagine_batch_size
             self.imagine_batch_length = imagine_batch_length
+            # these three parameters are used to predict the future, so it will have one extra
             latent_size = (imagine_batch_size, imagine_batch_length+1, self.stoch_flattened_dim)
             hidden_size = (imagine_batch_size, imagine_batch_length+1, self.transformer_hidden_dim)
+            obs_hat_size = (imagine_batch_size, imagine_batch_length+1, self.in_channels) # set obs dimension
+            # other parametes are saying information about the current time step
+            action_size = (imagine_batch_size, imagine_batch_length, 12) # set action dimension
             scalar_size = (imagine_batch_size, imagine_batch_length)
+            self.obs_hat_buffer = torch.zeros(obs_hat_size, dtype=dtype, device="cuda")
             self.latent_buffer = torch.zeros(latent_size, dtype=dtype, device="cuda")
             self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device="cuda")
-            self.action_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+            self.action_buffer = torch.zeros(action_size, dtype=dtype, device="cuda")
             self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
             self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
 
@@ -471,6 +476,43 @@ class WorldModel(nn.Module):
             logger.log("Imagine/predict_video", torch.clamp(torch.cat(obs_hat_list, dim=1), 0, 1).cpu().float().detach().numpy())
 
         return torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1), self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
+    
+    def imagine_step(self, batch_size, sample_obs, sample_action, reward_sample, termination_sample, imag_step):
+        # context
+        # uset the encoder to encode the obs
+        context_latent = self.encode_obs(sample_obs[:,-1:,:])
+        
+        last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
+                context_latent[:,-1:,:],
+                sample_action[:, -1:, :],
+                log_video=True
+            )
+        
+        # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1,:]
+        # self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1,:]
+        # self.hidden_buffer[:, 0:1] = dist_feat[:,-1,:]
+        return last_obs_hat, last_obs_hat, last_reward_hat, last_termination_hat
+
+    def setup_imagination(self, batch_size, sample_obs, sample_action, batch_length):
+        # if start to step using imagination, initialize the buffer and reset kv_cache
+        self.init_imagine_buffer(batch_size, batch_length, dtype=self.tensor_dtype)
+        self.storm_transformer.reset_kv_cache_list(batch_size, dtype=self.tensor_dtype)
+        self.storm_transformer.eval()
+        # =====aggregate the kv_cache=====
+        # context
+        context_latent = self.encode_obs(sample_obs)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            temporal_mask = get_subsequent_mask(context_latent)
+            dist_feat = self.storm_transformer.forward_context(context_latent, sample_action, temporal_mask)
+            prior_logits = self.dist_head.forward_prior(dist_feat)
+            prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
+            prior_flattened_sample = self.flatten_sample(prior_sample) 
+            obs_hat = self.image_decoder(prior_flattened_sample)
+
+        self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1:,:]
+        self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1:,:]
+        self.hidden_buffer[:, 0:1] = dist_feat[:,-1:,:]
+        return obs_hat[:, -1:,:], prior_flattened_sample[:,-1:,:], dist_feat[:,-1:,:]# return the predicted observation, the flattend
 
     def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
         self.train()

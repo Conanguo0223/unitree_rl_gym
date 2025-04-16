@@ -88,6 +88,8 @@ class PPO:
         self.actor_critic.train()
 
     def act(self, obs, critic_obs):
+        obs = obs.flatten(start_dim=1)
+        critic_obs = critic_obs.flatten(start_dim=1)
         if self.actor_critic.is_recurrent:
             self.transition.hidden_states = self.actor_critic.get_hidden_states()
         # Compute the actions and values
@@ -101,12 +103,13 @@ class PPO:
         self.transition.critic_observations = critic_obs
         return self.transition.actions
     
-    def process_env_step(self, rewards, dones, infos, imagine=False):
+    def process_env_step(self, rewards, dones, infos):
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
         # Bootstrapping on time outs
-        if 'time_outs' in infos and imagine :
-            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
+        if infos is not None:
+            if 'time_outs' in infos:
+                self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
 
         # Record the transition
         self.storage.add_transitions(self.transition)

@@ -56,12 +56,14 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
     """ Configuration for the GO2 environment with TWM algorithm """
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
+        
         # transformer algorithm parameters
 
     class policy( LeggedRobotCfgPPO.policy ):
-        imagination_horizon = 16
+        imagination_horizon = 8
+        
     class twm():
-        twm_max_len = 64
+        twm_max_len = 32
         twm_hidden_dim = 512
         twm_num_layers = 2
         twm_num_heads = 8
@@ -70,8 +72,10 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
         batch_length = 16
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 1
-        train_tokenizer_times = 500
-        train_dynamic_times = 500
+        train_tokenizer_times = 10
+        train_dynamic_times = 10
+        use_context = False
+        twm_train_policy_steps = 500
         # class Agent():
         #     num_layers = 2
         #     hidden_dim = 512
