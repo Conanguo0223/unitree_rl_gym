@@ -1,5 +1,6 @@
 from legged_gym import LEGGED_GYM_ROOT_DIR, envs
-from time import time
+# from time import time
+import time
 from warnings import WarningMessage
 import numpy as np
 import os
