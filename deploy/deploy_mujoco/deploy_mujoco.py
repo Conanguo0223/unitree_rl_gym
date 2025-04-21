@@ -19,15 +19,14 @@ def get_gravity_orientation(quaternion):
     gravity_orientation[0] = 2 * (-qz * qx + qw * qy)
     gravity_orientation[1] = -2 * (qz * qy + qw * qx)
     gravity_orientation[2] = 1 - 2 * (qw * qw + qz * qz)
-    # v = np.array([ 0.  ,  0.  , -9.81])
+
+    # v = np.array([ 0.  ,  0.  , -1.0])
     # q_w = quaternion[0]
     # q_vec = quaternion[1:4]
     # a = v * (2.0 * q_w ** 2 - 1.0)
     # b = np.cross(q_vec, v) * q_w * 2.0
     # c = q_vec * np.matmul(q_vec, v)* 2.0
     # return a - b + c
-
-
     return gravity_orientation
 
 
@@ -121,14 +120,15 @@ if __name__ == "__main__":
         standing = False
         dt = 0.002
         runing_time = 0.0
-
-        action = np.zeros_like(kds)
+        kds = np.ones_like(kds) * 0.2
+        kps = np.ones_like(kps) * 15.0
+        # action = np.zeros_like(kds)
         while viewer.is_running() and time.time() - start < simulation_duration:
             step_start = time.time()
             
             tau = pd_control(target_dof_pos, d.sensordata[:12], kps, np.zeros_like(kds), d.sensordata[12:12+12], kds)
             if not standing:
-                if counter < 500:
+                if counter < 250:
                     tau = np.zeros_like(kds)
                 else:
                     runing_time += dt
@@ -160,11 +160,13 @@ if __name__ == "__main__":
                 qj = d.sensordata[:12]
                 dqj = d.sensordata[12:24]
                 quat = d.sensordata[36:40]
-                omega = d.sensordata[40:43]
-                qj = (qj - default_angles) * dof_pos_scale
-                dqj = dqj * dof_vel_scale
+                # omega = d.sensordata[40:43]
+                # qj = d.qpos[7:]
+                # dqj = d.qvel[6:]
+                # quat = d.qpos[3:7]
+                omega = d.qvel[3:6]
                 gravity_orientation = get_gravity_orientation(quat)
-                omega = omega * ang_vel_scale
+                print(gravity_orientation)
 
                 ''' self.base_lin_vel * self.obs_scales.lin_vel, #3
                     self.base_ang_vel  * self.obs_scales.ang_vel, #3
@@ -175,18 +177,19 @@ if __name__ == "__main__":
                     self.actions #12
                 '''
                 obs[:3] = d.qvel[0:3] * lin_vel_scale  # base linear velocity
-                obs[3:6] = omega*ang_vel_scale # base angular velocity
+                # print(d.qvel[0:3])
+                obs[3:6] = omega * ang_vel_scale # base angular velocity
                 obs[6:9] = gravity_orientation # self.projected_gravity
                 obs[9:12] = cmd * cmd_scale # self.commands[:, :3]
-                obs[12 : 12 + num_actions] = qj # dof_pos - default_dof_pos
-                obs[12 + num_actions : 12 + 2 * num_actions] = dqj # self.dof_vel
+                obs[12 : 12 + num_actions] = (qj-stand_up_joint_pos) * dof_pos_scale # dof_pos - default_dof_pos
+                obs[12 + num_actions : 12 + 2 * num_actions] = dqj * dof_vel_scale # self.dof_vel
                 obs[12 + 2 * num_actions : 12 + 3 * num_actions] = action # self.actions
                 obs_tensor = torch.from_numpy(obs).unsqueeze(0)
                 # policy inference
                 action = policy(obs_tensor).detach().numpy().squeeze()
                 # transform action to target_dof_pos
                 target_dof_pos = action * action_scale + stand_up_joint_pos
-                print(target_dof_pos)
+                # print(tau)
                 
             # Pick up changes to the physics state, apply perturbations, update options from GUI.
             viewer.sync()
