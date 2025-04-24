@@ -130,8 +130,10 @@ class OnPolicy_WM_Runner:
 
         # world model training parameters
         self.train_dynamics_steps = self.twm_cfg["twm_train_steps"]
-        self.train_using_dynamics_steps = self.twm_cfg["twm_train_policy_steps"]
-        self.batch_size = self.env.num_envs
+        self.start_train_dynamics_steps = self.twm_cfg["twm_start_train_steps"]
+        self.start_train_using_dynamics_steps = self.twm_cfg["twm_start_train_policy_steps"]
+        self.train_tw_policy_steps = self.twm_cfg["twm_train_policy_steps"]
+        self.batch_size = 128
         self.batch_length = self.twm_cfg["batch_length"]
         self.demonstration_batch_size = self.twm_cfg["demonstration_batch_size"]
         self.train_agent_steps = self.twm_cfg["train_agent_steps"]
@@ -268,7 +270,7 @@ class OnPolicy_WM_Runner:
 
             start = stop
             # 3. Update world model
-            if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
+            if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
                 # 3-1 train tokenizer
                 for it_tok in range(self.train_tokenizer_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
@@ -293,7 +295,7 @@ class OnPolicy_WM_Runner:
 
             start = stop
             # 4. update policy on imagined data generated from world model
-            if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0:
+            if self.replay_buffer.ready() and it%self.train_tw_policy_steps == 0 and it > self.start_train_using_dynamics_steps:
                 # 4-1 imagine data
                 for it_im in range(self.train_agent_steps):
                     with torch.inference_mode():

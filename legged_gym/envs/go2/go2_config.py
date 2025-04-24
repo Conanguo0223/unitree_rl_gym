@@ -69,14 +69,17 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
         twm_num_layers = 2
         twm_num_heads = 8
         twm_train_steps = 2 # train the transformer per this many steps
+        twm_start_train_steps = 100 # start training the transformer after this many steps
+        twm_start_train_policy_steps = 150 # start training the policy using dynamics after this many steps
+        twm_train_policy_steps = 3 # train the policy using dynamics per this many steps
         batch_size = 16
         batch_length = 16
         demonstration_batch_size = 0 # batch size for external data
-        train_agent_steps = 1
+        train_agent_steps = 5 # train the agent this many steps using dynamics
         train_tokenizer_times = 10
         train_dynamic_times = 10
         use_context = False
-        twm_train_policy_steps = 500
+        
         # class Agent():
         #     num_layers = 2
         #     hidden_dim = 512

@@ -1,8 +1,8 @@
 # 
 # policy_path: "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2/exported/policies/policy_1.pt"
 # policy_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/policies/policy_42401.pt"
-# policy_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/policies/policy_42414.pt"
 policy_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/policies/policy_7.pt"
+world_model_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/world_model/world_model_7.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/go2_scene/scene.xml"
 
 # Total simulation time
@@ -17,10 +17,10 @@ kds: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
 
 new_seq: [3, 4, 5, 0, 1 , 2, 9, 10, 11, 6, 7, 8]
 
-default_angles: [0.1, 0.8, -1.5, 
-                 -0.1, 0.8,-1.5,
-                  0.1, 1.0,-1.5,
-                  -0.1, 1.0,-1.5]         
+default_angles: [ 0.1, 0.8, -1.5, 
+                 -0.1, 0.8, -1.5,
+                  0.1, 1.0, -1.5,
+                 -0.1, 1.0, -1.5]         
 
 lin_vel_scale: 2.0
 ang_vel_scale: 0.25

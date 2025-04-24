@@ -86,7 +86,6 @@ if __name__ == "__main__":
     m = mujoco.MjModel.from_xml_path(xml_path)
     d = mujoco.MjData(m)
     m.opt.timestep = simulation_dt
-    dim_motor_sensor_ = 3 * 12
     foot_geom_names = ['FL', 'FR', 'RR', 'RL']
 
 
