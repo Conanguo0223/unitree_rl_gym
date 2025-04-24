@@ -43,10 +43,10 @@ class LeggedRobotCfg(BaseConfig):
         resampling_time = 10. # time before command are changed[s]
         heading_command = True # if true: compute ang vel command from heading error
         class ranges:
-            lin_vel_x = [-1.0, 1.0] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
-            ang_vel_yaw = [-1, 1]    # min max [rad/s]
-            heading = [-3.14, 3.14]
+            lin_vel_x = [1.0, 1.0] # min max [m/s]
+            lin_vel_y = [0.0, 0.0]   # min max [m/s]
+            ang_vel_yaw = [0.0, 0.0]    # min max [rad/s]
+            heading = [0.0, 0.0]
 
     class init_state:
         pos = [0.0, 0.0, 1.] # x,y,z [m]
@@ -177,7 +177,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         init_noise_std = 1.0
         actor_hidden_dims = [512, 256, 256, 128]
         critic_hidden_dims = [512, 256, 256, 128]
-        activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
+        activation = 'lrelu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
         # only for 'ActorCriticRecurrent':
         # rnn_type = 'lstm'
         # rnn_hidden_size = 512
@@ -202,10 +202,10 @@ class LeggedRobotCfgPPO(BaseConfig):
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
         num_steps_per_env = 24 # per iteration
-        max_iterations = 1500 # number of policy updates
+        max_iterations = 3000 # number of policy updates
 
         # logging
-        save_interval = 50 # check for potential saves every this many iterations
+        save_interval = 100 # check for potential saves every this many iterations
         experiment_name = 'test'
         run_name = ''
         # load and resume

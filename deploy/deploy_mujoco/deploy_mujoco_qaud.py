@@ -22,6 +22,15 @@ def get_gravity_orientation(quaternion):
 
     return gravity_orientation
 
+def quat_rotate_inverse(quaternion):
+    v = np.array([0, 0, 1], dtype=np.float32)
+    q_w = quaternion[0]
+    q_vec = quaternion[1:]
+    a = v * (2.0 * q_w ** 2 - 1.0)
+    b = np.cross(q_vec, v) * q_w * 2.0
+    c = q_vec * np.matmul(q_vec, v)* 2.0
+    return a - b + c
+
 
 def pd_control(target_q, q, kp, target_dq, dq, kd):
     """Calculates torques from position commands"""
@@ -83,7 +92,7 @@ if __name__ == "__main__":
 
     # load policy
     policy = torch.jit.load(policy_path)
-    # kps = np.ones_like(kps)*20
+    # kps = np.ones_like(kps)*15
     # kds = np.ones_like(kds)*0.5
     with mujoco.viewer.launch_passive(m, d) as viewer:
         # Close the viewer automatically after simulation_duration wall-seconds.
@@ -153,7 +162,8 @@ if __name__ == "__main__":
                     dqj = d.qvel[6:] # d.sensordata[12:24]
                     quat = d.qpos[3:7] # d.sensordata[36:40]
                     omega = d.qvel[3:6] # d.sensordata[40:43 ]
-                    gravity_orientation = get_gravity_orientation(quat)
+                    # gravity_orientation = get_gravity_orientation(quat)
+                    gravity_orientation = quat_rotate_inverse(quat)
                     omega = omega
                     
                     obs[:3] = d.qvel[:3] * lin_vel_scale #d.sensordata[49:52] * lin_vel_scale  # base linear velocity
@@ -166,10 +176,10 @@ if __name__ == "__main__":
                     obs_tensor = torch.from_numpy(obs).unsqueeze(0)
                     # policy inference
                     action = policy(obs_tensor).detach().numpy().squeeze()
-                    action = np.clip(action, -23, 23)
+                    # action = np.clip(action, -23, 23)
                     # transform action to target_dof_pos
                     target_dof_pos = action * action_scale + default_angles[new_seq]
-
+                    print(target_dof_pos)
                 # Pick up changes to the physics state, apply perturbations, update options from GUI.
                 viewer.sync()
 
