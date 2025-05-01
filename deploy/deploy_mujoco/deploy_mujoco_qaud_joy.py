@@ -33,6 +33,15 @@ def get_gravity_orientation(quaternion):
 
     return gravity_orientation
 
+def quat_rotate_inverse(quaternion):
+    v = np.array([0, 0, 1], dtype=np.float32)
+    q_w = quaternion[0]
+    q_vec = quaternion[1:]
+    a = v * (2.0 * q_w ** 2 - 1.0)
+    b = np.cross(q_vec, v) * q_w * 2.0
+    c = q_vec * np.matmul(q_vec, v)* 2.0
+    return a - b + c
+
 
 def pd_control(target_q, q, kp, target_dq, dq, kd):
     """Calculates torques from position commands"""
@@ -152,6 +161,7 @@ if __name__ == "__main__":
                 if counter % control_decimation == 0:
                     # Apply control signal here.
                     cmd = np.array([lin_vel_x, lin_vel_y, ang_vel], dtype=np.float32)
+                    print(cmd)
                     # create observation
                     qj = d.qpos[7:] #d.sensordata[:12]
                     dqj = d.qvel[6:] # d.sensordata[12:24]

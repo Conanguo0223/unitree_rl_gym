@@ -64,16 +64,16 @@ class GO2RoughCfgTWM( LeggedRobotCfgPPO):
         imagination_horizon = 8
         
     class twm():
-        twm_max_len = 32
+        twm_max_len = 16
         twm_hidden_dim = 512
         twm_num_layers = 2
         twm_num_heads = 8
         twm_train_steps = 2 # train the transformer per this many steps
-        twm_start_train_steps = 100 # start training the transformer after this many steps
-        twm_start_train_policy_steps = 150 # start training the policy using dynamics after this many steps
-        twm_train_policy_steps = 3 # train the policy using dynamics per this many steps
-        batch_size = 16
-        batch_length = 16
+        twm_start_train_steps = 1500 # start training the transformer after this many steps
+        twm_start_train_policy_steps = 2500 # start training the policy using dynamics after this many steps
+        twm_train_policy_steps = 5 # train the policy using dynamics per this many steps
+        dreaming_batch_size = 128 # batch size for dreaming 
+        batch_length = 8
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 5 # train the agent this many steps using dynamics
         train_tokenizer_times = 10

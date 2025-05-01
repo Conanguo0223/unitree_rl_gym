@@ -133,14 +133,14 @@ class OnPolicy_WM_Runner:
         self.start_train_dynamics_steps = self.twm_cfg["twm_start_train_steps"]
         self.start_train_using_dynamics_steps = self.twm_cfg["twm_start_train_policy_steps"]
         self.train_tw_policy_steps = self.twm_cfg["twm_train_policy_steps"]
-        self.batch_size = 128
+        self.dreaming_batch_size = self.twm_cfg["dreaming_batch_size"]
         self.batch_length = self.twm_cfg["batch_length"]
         self.demonstration_batch_size = self.twm_cfg["demonstration_batch_size"]
         self.train_agent_steps = self.twm_cfg["train_agent_steps"]
         self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
         self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
         # init storage and model for the policy
-        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions])
+        self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions], self.dreaming_batch_size)
 
         # Log
         self.log_dir = log_dir
@@ -273,7 +273,7 @@ class OnPolicy_WM_Runner:
             if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
                 # 3-1 train tokenizer
                 for it_tok in range(self.train_tokenizer_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.batch_length)
                     # (batch, time, feature)
                     if it_tok < self.train_tokenizer_times-1:
                         self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
@@ -283,7 +283,7 @@ class OnPolicy_WM_Runner:
                 
                 # 3-2 train dynamics
                 for it_wm in range(self.train_dynamics_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.batch_length)
                     if it_wm < self.train_dynamics_times-1:
                         self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:
@@ -301,32 +301,34 @@ class OnPolicy_WM_Runner:
                     with torch.inference_mode():
                         self.worldmodel.eval() # switch to evaluation mode (dropout for example)
                         # sample actual experience from replay buffer
-                        obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.batch_size, self.demonstration_batch_size, self.batch_length)
+                        obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.batch_length)
                         # setup the context length of the model using the sampled obs ... (24 steps)
                         # similar like the prompt in transformer models, we need to setup the context, and pre calculate the KV-cache
                         # this should generate the next predicted output using the sampled action.
-                        pred_obs, _,_ = self.worldmodel.setup_imagination(self.batch_size, obs_sample, action_sample,self.batch_length) 
+                        pred_obs, _,_ = self.worldmodel.setup_imagination(self.dreaming_batch_size, obs_sample, action_sample,self.batch_length) 
                         pred_obs = pred_obs.float()
-                        obs_sample = torch.cat((obs_sample, pred_obs),dim=1)
+                        pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
+                        obs_sample_for_inference = torch.cat((obs_sample, pred_obs),dim=1)
                         # rollout the world model
                         for imag_step in range(self.imagination_horizon):
                             # sample action from the policy
                             # TODO: should just use the final state of the observation to get the action and apply it.
-                            actions = self.alg.act(pred_obs[:,-1:,:], pred_obs[:,-1:,:]) # critic_obs is currently the same as obs
+                            actions = self.alg.act(pred_obs[:,-1,:], pred_critic_obs[:,-1,:]) # critic_obs is currently the same as obs
                             action_sample = torch.cat((action_sample, actions.unsqueeze(dim=1)), dim=1)
                             # use the sampled action to do roll outs in the world model
                             #=============Step using the world model=============
-                            obs_sample, critic_obs_sample, reward_sample, termination_sample = self.worldmodel.imagine_step(self.batch_size, obs_sample, action_sample, reward_sample, termination_sample, imag_step)
+                            pred_obs, critic_obs_sample, reward_sample, termination_sample = self.worldmodel.imagine_step(self.dreaming_batch_size, obs_sample, action_sample, reward_sample, termination_sample, imag_step)
 
-                            critic_obs = privileged_obs if privileged_obs is not None else obs
-                            obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                            pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
+                            pred_obs, pred_critic_obs = pred_obs.to(self.device,dtype=torch.float), pred_critic_obs.to(self.device,dtype=torch.float)
+                            rewards, dones = reward_sample.to(self.device,dtype=torch.float).squeeze(), termination_sample.to(self.device,dtype=torch.float).squeeze()
                             # update the policy with the imagined data
-                            self.alg.process_env_step(reward_sample, termination_sample, None)
+                            self.alg.process_env_step_dream(rewards, dones, None)
                         
-                        self.alg.compute_returns(critic_obs)
+                        self.alg.compute_returns_dream(pred_critic_obs.squeeze())
 
                     # 4-2 update the policy
-                    mean_value_loss, mean_surrogate_loss = self.alg.update()
+                    mean_value_loss, mean_surrogate_loss = self.alg.update_dream()
                     stop = time.time()
                     learn_time = stop - start
 
