@@ -1,8 +1,8 @@
 # 
 # policy_path: "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2/exported/policies/policy_1.pt"
 # policy_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/policies/policy_42401.pt"
-policy_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/policies/policy_7.pt"
-world_model_path: "/home/conang/quadruped/unitree_rl_gym/deploy/pre_train/go2/world_model/world_model_7.pt"
+policy_path: "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May01_23-07-36_/model_2499.pt"
+world_model_path: "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May01_23-07-36_/world_model_2499.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/go2_scene/scene.xml"
 
 # Total simulation time

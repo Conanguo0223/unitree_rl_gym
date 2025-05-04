@@ -66,6 +66,41 @@ def build_world_model(in_channels, action_dim, twm_cfg):
 #         entropy_coef = alg_cfg["Agent"]["entropyCoef"],
 #     ).cuda()
 
+def compute_torques(actions):
+    actions_scaled = actions * self.cfg.control.action_scale
+    torques = self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains*self.dof_vel
+    return torch.clip(torques, -self.torque_limits, self.torque_limits)
+
+# def obs2reward(env, obs, action, reward, termination):
+#     # self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
+#     #                             self.base_ang_vel  * self.obs_scales.ang_vel,
+#     #                             self.projected_gravity,
+#     #                             self.commands[:, :3] * self.commands_scale,
+#     #                             (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+#     #                             self.dof_vel * self.obs_scales.dof_vel,
+#     #                             self.actions
+#     #                            ),dim=-1)
+#     # Reward tracking linear velocity
+#     lin_vel_error = torch.sum(torch.square(env.commands[:, :2] - obs.base_lin_vel), dim=1)
+#     lin_vel_error = torch.exp(-lin_vel_error / env.rewards.tracking_sigma)
+#     # Reward tracking angular velocity
+#     ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+#     ang_vel_error = torch.exp(-ang_vel_error / env.rewards.tracking_sigma)
+#     # Linear velociy Z axis
+#     lin_vel_z_error = torch.square(self.base_lin_vel[:, 2])
+#     # Angular velocity xy axis
+#     ang_vell_xy_error = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+#     # Torques
+#     torques = compute_torques(self.actions)
+#     reward_torques = torch.sum(torch.square(self.torques), dim=1)
+#     # DoF position accel
+#     dof_pos_accel = torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
+#     # Action rate
+#     action_rate = torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+#     # collision
+#     collision_reward = torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)
+#     # orientation
+#     orientaion_reward = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
 
 def imagine_one_step(worldmodel: WorldModel, sample_obs, sample_action):
     # use the observations sampled from the replay buffer to generate the next observation
@@ -80,7 +115,7 @@ def imagine_one_step(worldmodel: WorldModel, sample_obs, sample_action):
         )
 
 
-class OnPolicy_WM_Runner:
+class OnPolicy_WM_Runner_Val:
 
     def __init__(self,
                  env: VecEnv,
@@ -108,11 +143,21 @@ class OnPolicy_WM_Runner:
                                                         self.num_critic_obs,
                                                         self.env.num_actions,
                                                         **self.policy_cfg).to(self.device)
+        load_world_model = True
+        load_policy_model = True
+
+        if load_world_model:
+            self.worldmodel.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May04_09-59-42_/world_model_4999.pt"))
+            print("loaded pretrained world")
+        if load_policy_model:
+            actor_critic.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May04_09-59-42_/model_5000.pt")["model_state_dict"])
+            print("loaded pretrained policy")
+        
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
 
         # bigger replay buffer for the world model
-        self.num_steps_per_env = self.cfg["num_steps_per_env"] # 24, this is also the context length
+        self.num_steps_per_env = self.cfg["num_steps_per_env"] # 40, this is also the context length
         self.imagination_horizon = self.policy_cfg["imagination_horizon"]
         self.save_interval = self.cfg["save_interval"] 
         self.replay_buffer = ReplayBuffer_seq(
@@ -149,7 +194,7 @@ class OnPolicy_WM_Runner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.log_movie_steps = 100
-
+        self.use_imagination = False
         _, _ = self.env.reset()
     
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
@@ -162,14 +207,14 @@ class OnPolicy_WM_Runner:
         # obs, privileged_obs, rewards, dones, infos
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
-        
+        current_obs_loss = 1000
         dones = self.env.get_dones()
         infos = self.env.get_extra()
         critic_obs = privileged_obs if privileged_obs is not None else obs
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         # switch the agent to train mode
         self.alg.actor_critic.train()
-
+        
         ep_infos = []
         rewbuffer = deque(maxlen=100) # calculate mean reward 
         lenbuffer = deque(maxlen=100) # calculate mean episode length
@@ -177,6 +222,7 @@ class OnPolicy_WM_Runner:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current episode length
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
+        
         """
         The learning algorithm roughly follow the following steps:
         1. Collect num_steps_per_env steps of experience from the environment.
@@ -186,6 +232,7 @@ class OnPolicy_WM_Runner:
         """
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
+            mean_value_loss_wm, mean_surrogate_loss_wm = None, None
             # 1. Collect num_steps_per_env steps of experience from the environment.
             with torch.inference_mode():
                 obs_buf = []
@@ -262,7 +309,12 @@ class OnPolicy_WM_Runner:
                 self.alg.compute_returns(critic_obs)
             
             # 2. Update policy on environment data
-            mean_value_loss, mean_surrogate_loss = self.alg.update()
+            # if self.use_imagination:
+            #     print("Stop learning")
+            #     mean_value_loss, mean_surrogate_loss = self.alg.update(lock=True)
+            # else:
+            #     mean_value_loss, mean_surrogate_loss = self.alg.update(lock=False)
+            mean_value_loss, mean_surrogate_loss = self.alg.update(lock=False)
             stop = time.time()
             learn_time = stop - start
             # =============end update policy=============
@@ -270,10 +322,14 @@ class OnPolicy_WM_Runner:
 
             start = stop
             # 3. Update world model
-            if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
+            if it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
                 # 3-1 train tokenizer
+                # modify the batch size
+                batch_size = self.dreaming_batch_size
+                if self.replay_buffer.current_index < self.dreaming_batch_size:
+                    batch_size = self.replay_buffer.current_index
                 for it_tok in range(self.train_tokenizer_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.num_steps_per_env)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.demonstration_batch_size, self.batch_length)
                     # (batch, time, feature)
                     if it_tok < self.train_tokenizer_times-1:
                         self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
@@ -283,26 +339,50 @@ class OnPolicy_WM_Runner:
                 
                 # 3-2 train dynamics
                 for it_wm in range(self.train_dynamics_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.num_steps_per_env)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.demonstration_batch_size, self.batch_length)
                     if it_wm < self.train_dynamics_times-1:
                         self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:
                         # only log the final one
-                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+                        current_obs_loss = self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer, return_loss=True)
             stop = time.time()
             learn_WM_time = stop - start
             # =============end updating world model=============            
-
+            # if current_obs_loss < 0.7 and not self.use_imagination:
+            #     self.use_imagination = True
+            #     self.save(os.path.join(self.log_dir, 'model_midway_{}.pt'.format(self.current_learning_iteration)))
+            #     torch.save(self.worldmodel.state_dict(), os.path.join(self.log_dir, 'world_model_midway_{}.pt'.format(it)))
+            #     torch.save(self.alg.actor_critic.actor.state_dict(), os.path.join(self.log_dir, 'model_actor_midway_{}.pt'.format(it)))
             start = stop
             # 4. update policy on imagined data generated from world model
-            # if self.replay_buffer.ready() and it%self.train_tw_policy_steps == 0 and it > self.start_train_using_dynamics_steps:
+            # if it%self.train_tw_policy_steps == 0 and it > self.start_train_using_dynamics_steps and current_obs_loss<0.7:
+            #     print("start dreaming")
             if False:
+                # check batch size
+                batch_size = self.dreaming_batch_size
+                if self.replay_buffer.current_index < self.dreaming_batch_size:
+                    batch_size = self.replay_buffer.current_index
                 # 4-1 imagine data
                 for it_im in range(self.train_agent_steps):
                     with torch.inference_mode():
                         self.worldmodel.eval() # switch to evaluation mode (dropout for example)
                         # sample actual experience from replay buffer
-                        obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.batch_length)
+                        obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.demonstration_batch_size, self.batch_length)
+                        if batch_size < self.dreaming_batch_size:
+                            repeat_factor = self.dreaming_batch_size // batch_size  # Calculate how many times to repeat
+                            repeat_factor = repeat_factor + 1
+                            obs_sample = obs_sample.repeat_interleave(repeat_factor, dim=0)
+                            critic_obs_sample = critic_obs_sample.repeat_interleave(repeat_factor, dim=0)
+                            action_sample = action_sample.repeat_interleave(repeat_factor, dim=0)
+                            reward_sample = reward_sample.repeat_interleave(repeat_factor, dim=0)
+                            termination_sample = termination_sample.repeat_interleave(repeat_factor, dim=0)
+
+                            # If 128 is not a multiple of batch_size, trim the excess
+                            obs_sample = obs_sample[:self.dreaming_batch_size]
+                            critic_obs_sample = critic_obs_sample[:self.dreaming_batch_size]
+                            action_sample = action_sample[:self.dreaming_batch_size]
+                            reward_sample = reward_sample[:self.dreaming_batch_size]
+                            termination_sample = termination_sample[:self.dreaming_batch_size]
                         # setup the context length of the model using the sampled obs ... (24 steps)
                         # similar like the prompt in transformer models, we need to setup the context, and pre calculate the KV-cache
                         # this should generate the next predicted output using the sampled action.
@@ -313,12 +393,11 @@ class OnPolicy_WM_Runner:
                         # rollout the world model
                         for imag_step in range(self.imagination_horizon):
                             # sample action from the policy
-                            # TODO: should just use the final state of the observation to get the action and apply it.
                             actions = self.alg.act(pred_obs[:,-1,:], pred_critic_obs[:,-1,:]) # critic_obs is currently the same as obs
                             action_sample = torch.cat((action_sample, actions.unsqueeze(dim=1)), dim=1)
                             # use the sampled action to do roll outs in the world model
                             #=============Step using the world model=============
-                            pred_obs, critic_obs_sample, reward_sample, termination_sample = self.worldmodel.imagine_step(self.dreaming_batch_size, obs_sample, action_sample, reward_sample, termination_sample, imag_step)
+                            pred_obs, critic_obs_sample, reward_sample, termination_sample = self.worldmodel.imagine_step(batch_size, obs_sample, action_sample, reward_sample, termination_sample, imag_step)
 
                             pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
                             pred_obs, pred_critic_obs = pred_obs.to(self.device,dtype=torch.float), pred_critic_obs.to(self.device,dtype=torch.float)
@@ -329,7 +408,7 @@ class OnPolicy_WM_Runner:
                         self.alg.compute_returns_dream(pred_critic_obs.squeeze())
 
                     # 4-2 update the policy
-                    mean_value_loss, mean_surrogate_loss = self.alg.update_dream()
+                    mean_value_loss_wm, mean_surrogate_loss_wm = self.alg.update_dream()
                     stop = time.time()
                     learn_time = stop - start
 
@@ -350,7 +429,7 @@ class OnPolicy_WM_Runner:
                 self.log(locals())
             if it % self.save_interval == 0 and it < self.start_train_dynamics_steps:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
-            elif it % self.save_interval == 0:
+            elif it % self.save_interval == 0:    
                 torch.save(self.worldmodel.state_dict(), os.path.join(self.log_dir, 'world_model_{}.pt'.format(it)))
                 torch.save({'model_state_dict': self.alg.actor_critic.state_dict(),'optimizer_state_dict': self.alg.optimizer.state_dict(),
                             'iter': self.current_learning_iteration, 'infos': infos,}, os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
@@ -386,6 +465,9 @@ class OnPolicy_WM_Runner:
 
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
+        if locs['mean_value_loss_wm'] is not None:
+            self.writer.add_scalar('Loss/value_function_wm', locs['mean_value_loss_wm'], locs['it'])
+            self.writer.add_scalar('Loss/surrogate_wm', locs['mean_surrogate_loss_wm'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])

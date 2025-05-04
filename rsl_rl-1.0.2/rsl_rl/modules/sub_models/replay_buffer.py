@@ -159,11 +159,11 @@ class ReplayBuffer_seq():
         max_index = self.actual_max_length if self.full else self.current_index
         indices = torch.randint(0, max_index, (batch_size,), device=to_device)
 
-        obs = self.obs_buffer[indices]
-        priv_obs = self.priv_obs_buffer[indices]
-        action = self.action_buffer[indices]
-        reward = self.reward_buffer[indices]
-        termination = self.termination_buffer[indices]
+        obs = self.obs_buffer[indices, :batch_length]
+        priv_obs = self.priv_obs_buffer[indices, :batch_length]
+        action = self.action_buffer[indices, :batch_length]
+        reward = self.reward_buffer[indices, :batch_length]
+        termination = self.termination_buffer[indices, :batch_length]
 
         return obs, priv_obs, action, reward, termination
 

@@ -8,6 +8,7 @@ import sys
 from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner
 from rsl_rl.runners import OnPolicy_WM_Runner
+from rsl_rl.runners import OnPolicy_WM_Runner_Val
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
@@ -117,17 +118,20 @@ class TaskRegistry():
         
         train_cfg_dict = class_to_dict(train_cfg)
         # original runner
-        if "wm" not in name:
+        if "twm" not in name:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        else:
+        elif "val" not in name:
             # world model runner 
             runner = OnPolicy_WM_Runner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        
+        else:
+            runner = OnPolicy_WM_Runner_Val(env, train_cfg_dict, log_dir, device=args.rl_device)
+
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:
             # load previously trained model
             resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
+            resume_path = "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May03_09-51-58_/model_2500.pt"
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path)
         return runner, train_cfg

@@ -4,8 +4,18 @@ import mujoco.viewer
 import mujoco
 import numpy as np
 from legged_gym import LEGGED_GYM_ROOT_DIR
-import torch
+
 import yaml
+
+# This script is used to deploy mujoco quad robot with world model finetuning
+from legged_gym.envs.go2.go2_config import GO2RoughCfg, GO2RoughCfgPPO, GO2RoughCfgTWM
+
+import torch
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
+from rsl_rl.modules.sub_models.world_models import WorldModel
+from rsl_rl.modules.sub_models.functions_losses import symexp
+# from rsl_rl.modules.sub_models.agents import ActorCriticAgent
+from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq
 
 # scripts for deploying mujoco quad robot with world model finetuning
 
@@ -37,6 +47,17 @@ def pd_control(target_q, q, kp, target_dq, dq, kd):
     """Calculates torques from position commands"""
     return (target_q - q) * kp + (target_dq - dq) * kd
 
+
+def build_world_model(in_channels, action_dim):
+    return WorldModel(
+        in_channels=in_channels,
+        action_dim=action_dim,
+        # TODO: modify using config
+        transformer_max_length = GO2RoughCfgTWM.twm.twm_max_len,
+        transformer_hidden_dim = GO2RoughCfgTWM.twm.twm_hidden_dim,
+        transformer_num_layers = GO2RoughCfgTWM.twm.twm_num_layers,
+        transformer_num_heads = GO2RoughCfgTWM.twm.twm_num_heads
+    ).cuda()
 
 if __name__ == "__main__":
     # get config file name from command line
@@ -86,9 +107,45 @@ if __name__ == "__main__":
     max_iterations = 3
     foot_geom_names = ['FL', 'FR', 'RR', 'RL']
 
+    # world model stuff
+    obs_dim = num_obs
+    prive_obs_dim = 0
+    actor_critic = ActorCritic(obs_dim+prive_obs_dim, obs_dim+prive_obs_dim, num_actions,init_noise_std = 1.0,
+                                actor_hidden_dims = [512, 256, 128],
+                                critic_hidden_dims = [512, 256, 128],
+                                activation = 'elu')
+    worldmodel = build_world_model(num_obs, num_actions)
+
+    num_steps_per_env = GO2RoughCfgPPO.runner.num_steps_per_env # 24, this is also the context length
+    imagination_horizon = GO2RoughCfgTWM.policy.imagination_horizon
+    save_interval = GO2RoughCfgPPO.runner.save_interval#cfg["save_interval"] 
+    replay_buffer = ReplayBuffer_seq(
+        obs_shape = (num_obs,),
+        priv_obs_shape = (num_obs,),
+        action_shape=(num_actions,),
+        num_steps_per_env = num_steps_per_env,
+        num_envs = 1,
+        max_length = GO2RoughCfgTWM.buffer.max_len,
+        warmup_length = GO2RoughCfgTWM.buffer.BufferWarmUp,
+        store_on_gpu = GO2RoughCfgTWM.buffer.ReplayBufferOnGPU
+    )
+    print("fininshed replay buffer")
+    load_world_model = True
+    load_policy_model = True
+
+    if load_world_model:
+        worldmodel.load_state_dict(torch.load(world_model_path))
+        print("loaded pretrained world")
+    if load_policy_model:
+        actor_critic.load_state_dict(torch.load(policy_path)["model_state_dict"])
+        print("loaded pretrained policy")
+    # load policy and world model
+    # policy = torch.jit.load(policy_path)
+    # world_model = torch.jit.load(world_model_path)
 
     for i in range (max_iterations):
         # start iterating the training loop
+        # Types of training:
         # 1. train the model while the robot is running
         # 2. train the model after certain time steps of sims
         # 3. train the model after certain time steps of sims and rerun sim
@@ -101,9 +158,7 @@ if __name__ == "__main__":
         m = mujoco.MjModel.from_xml_path(xml_path)
         d = mujoco.MjData(m)
         m.opt.timestep = simulation_dt
-        # load policy
-        policy = torch.jit.load(policy_path)
-        # world_model = torch.jit.load(world_model_path)
+        
         with mujoco.viewer.launch_passive(m, d) as viewer:
             # Close the viewer automatically after simulation_duration wall-seconds.
             start = time.time()
@@ -181,11 +236,11 @@ if __name__ == "__main__":
                         
                         obs[:3] = d.qvel[:3] * lin_vel_scale #d.sensordata[49:52] * lin_vel_scale  # base linear velocity
                         obs[3:6] = omega * ang_vel_scale # base angular velocity
-                        obs[6:9] = gravity_orientation # self.projected_gravity
-                        obs[9:12] = cmd * cmd_scale # self.commands[:, :3]
+                        obs[6:9] = gravity_orientation # projected_gravity
+                        obs[9:12] = cmd * cmd_scale # commands[:, :3]
                         obs[12 : 12 + num_actions] = (qj - default_angles[new_seq] ) * dof_pos_scale# dof_pos - default_dof_pos
-                        obs[12 + num_actions : 12 + 2 * num_actions] = dqj  * dof_vel_scale # self.dof_vel
-                        obs[12 + 2 * num_actions : 12 + 3 * num_actions] = action # self.actions
+                        obs[12 + num_actions : 12 + 2 * num_actions] = dqj  * dof_vel_scale # dof_vel
+                        obs[12 + 2 * num_actions : 12 + 3 * num_actions] = action # actions
                         obs_tensor = torch.from_numpy(obs).unsqueeze(0)
                         # policy inference
                         action = policy(obs_tensor).detach().numpy().squeeze()

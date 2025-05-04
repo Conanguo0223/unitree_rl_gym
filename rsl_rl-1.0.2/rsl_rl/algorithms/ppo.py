@@ -145,7 +145,7 @@ class PPO:
         last_values= self.actor_critic.evaluate(last_critic_obs).detach()
         self.storage_for_dream.compute_returns(last_values, self.gamma, self.lam)
 
-    def update(self):
+    def update(self,lock=False):
         mean_value_loss = 0
         mean_surrogate_loss = 0
         if self.actor_critic.is_recurrent:
@@ -200,7 +200,8 @@ class PPO:
 
                 # Gradient step
                 self.optimizer.zero_grad()
-                loss.backward()
+                if not lock:
+                    loss.backward()
                 nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
@@ -240,9 +241,9 @@ class PPO:
                         kl_mean = torch.mean(kl)
 
                         if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                            self.learning_rate = max(1e-6, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                            self.learning_rate = min(1e-4, self.learning_rate * 1.5)
                         
                         for param_group in self.optimizer.param_groups:
                             param_group['lr'] = self.learning_rate
@@ -265,7 +266,7 @@ class PPO:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                loss = surrogate_loss + self.value_loss_coef * value_loss #- 0.5*self.entropy_coef * entropy_batch.mean()
 
                 # Gradient step
                 self.optimizer.zero_grad()

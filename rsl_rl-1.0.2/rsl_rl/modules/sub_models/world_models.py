@@ -514,7 +514,7 @@ class WorldModel(nn.Module):
         self.hidden_buffer[:, 0:1] = dist_feat[:,-1:,:]
         return obs_hat[:, -1:,:], prior_flattened_sample[:,-1:,:], dist_feat[:,-1:,:]# return the predicted observation, the flattend
 
-    def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
+    def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
         self.train()
         batch_size, batch_length = obs.shape[:2]
 
@@ -564,6 +564,8 @@ class WorldModel(nn.Module):
             writer.add_scalar("WorldModel/representation_loss", representation_loss.item(), it)
             writer.add_scalar("WorldModel/representation_real_kl_div", representation_real_kl_div.item(), it)
             writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
+        if return_loss:
+            return reconstruction_loss
     
     def update_tokenizer(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
         self.train()
