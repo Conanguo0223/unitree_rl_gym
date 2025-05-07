@@ -92,9 +92,11 @@ class LeggedRobotCfg(BaseConfig):
     class domain_rand:
         randomize_friction = True
         friction_range = [0.5, 1.25]
+        randomize_restitution = False
+        restitutions_range = [0.0, 0.4]
         randomize_base_mass = False
         added_mass_range = [-1., 1.]
-        push_robots = True
+        push_robots = False
         push_interval_s = 15
         max_push_vel_xy = 1.
 
@@ -108,8 +110,8 @@ class LeggedRobotCfg(BaseConfig):
             torques = -2.5e-5
             dof_acc = -2.5e-7
             action_rate = -0.01
-            feet_air_time =  0.5
-            collision = -1.
+            feet_air_time =  0.5 # unobservable
+            collision = -1. # unobservable
             orientation = -5.
             # non-paper rewards
             termination = -0.0

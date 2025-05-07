@@ -130,8 +130,8 @@ class TaskRegistry():
         resume = train_cfg.runner.resume
         if resume:
             # load previously trained model
-            resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
-            resume_path = "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May03_09-51-58_/model_2500.pt"
+            # resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
+            resume_path = "/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May05_17-18-28_modified/model_5000.pt"
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path)
         return runner, train_cfg

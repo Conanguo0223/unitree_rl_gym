@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel
+from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq
@@ -48,6 +48,18 @@ from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_s
 def build_world_model(in_channels, action_dim, twm_cfg):
     return WorldModel(
         in_channels=in_channels,
+        decoder_out_channels=in_channels - 15,# remove actions (12) and commands (3)
+        action_dim=action_dim,
+        transformer_max_length = twm_cfg["twm_max_len"],
+        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
+        transformer_num_layers = twm_cfg["twm_num_layers"],
+        transformer_num_heads = twm_cfg["twm_num_heads"]
+    ).cuda()
+
+def build_world_model_normal(in_channels, action_dim, twm_cfg):
+    return WorldModel_normal(
+        in_channels=in_channels,
+        decoder_out_channels=in_channels - 15,# remove actions (12) and commands (3)
         action_dim=action_dim,
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
@@ -66,10 +78,10 @@ def build_world_model(in_channels, action_dim, twm_cfg):
 #         entropy_coef = alg_cfg["Agent"]["entropyCoef"],
 #     ).cuda()
 
-def compute_torques(actions):
-    actions_scaled = actions * self.cfg.control.action_scale
-    torques = self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains*self.dof_vel
-    return torch.clip(torques, -self.torque_limits, self.torque_limits)
+# def compute_torques(actions):
+#     actions_scaled = actions * self.cfg.control.action_scale
+#     torques = self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains*self.dof_vel
+#     return torch.clip(torques, -self.torque_limits, self.torque_limits)
 
 # def obs2reward(env, obs, action, reward, termination):
 #     # self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
@@ -134,7 +146,7 @@ class OnPolicy_WM_Runner_Val:
             self.num_critic_obs = self.env.num_privileged_obs 
         else:
             self.num_critic_obs = self.env.num_obs
-        self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+        self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -147,10 +159,10 @@ class OnPolicy_WM_Runner_Val:
         load_policy_model = True
 
         if load_world_model:
-            self.worldmodel.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May04_09-59-42_/world_model_4999.pt"))
+            self.worldmodel.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May07_02-03-59_/world_model_4999.pt"))
             print("loaded pretrained world")
         if load_policy_model:
-            actor_critic.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May04_09-59-42_/model_5000.pt")["model_state_dict"])
+            actor_critic.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May05_17-18-28_modified/model_5000.pt")["model_state_dict"])
             print("loaded pretrained policy")
         
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
@@ -220,7 +232,7 @@ class OnPolicy_WM_Runner_Val:
         lenbuffer = deque(maxlen=100) # calculate mean episode length
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current reward 
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current episode length
-
+        episodic_reward = 0
         tot_iter = self.current_learning_iteration + num_learning_iterations
         
         """
@@ -272,7 +284,7 @@ class OnPolicy_WM_Runner_Val:
                     # buf: (num_steps_per_env, num_envs, ...)
                     # during training, transformer should sample from the buffer with samples like
                     # sample: (batch_size, num_steps_per_env, ...)
-
+                    episodic_reward += rewards.mean().item()
                     # =============Book keeping=============
                     if self.log_dir is not None:
                         # Book keeping
@@ -309,12 +321,14 @@ class OnPolicy_WM_Runner_Val:
                 self.alg.compute_returns(critic_obs)
             
             # 2. Update policy on environment data
-            # if self.use_imagination:
-            #     print("Stop learning")
-            #     mean_value_loss, mean_surrogate_loss = self.alg.update(lock=True)
-            # else:
-            #     mean_value_loss, mean_surrogate_loss = self.alg.update(lock=False)
-            mean_value_loss, mean_surrogate_loss = self.alg.update(lock=False)
+            record_episodic_reward = episodic_reward
+            if episodic_reward<0.6:
+                print("Stop learning")
+                mean_value_loss, mean_surrogate_loss = self.alg.update(lock=True)
+            else:
+                mean_value_loss, mean_surrogate_loss = self.alg.update(lock=True)
+            episodic_reward = 0
+            # mean_value_loss, mean_surrogate_loss = self.alg.update(lock=False)
             stop = time.time()
             learn_time = stop - start
             # =============end update policy=============
@@ -355,9 +369,9 @@ class OnPolicy_WM_Runner_Val:
             #     torch.save(self.alg.actor_critic.actor.state_dict(), os.path.join(self.log_dir, 'model_actor_midway_{}.pt'.format(it)))
             start = stop
             # 4. update policy on imagined data generated from world model
-            # if it%self.train_tw_policy_steps == 0 and it > self.start_train_using_dynamics_steps and current_obs_loss<0.7:
-            #     print("start dreaming")
-            if False:
+            if it%self.train_tw_policy_steps == 0 and it > self.start_train_using_dynamics_steps and current_obs_loss<0.75:
+                print("start dreaming")
+            # if False:
                 # check batch size
                 batch_size = self.dreaming_batch_size
                 if self.replay_buffer.current_index < self.dreaming_batch_size:
@@ -386,8 +400,16 @@ class OnPolicy_WM_Runner_Val:
                         # setup the context length of the model using the sampled obs ... (24 steps)
                         # similar like the prompt in transformer models, we need to setup the context, and pre calculate the KV-cache
                         # this should generate the next predicted output using the sampled action.
-                        pred_obs, _,_ = self.worldmodel.setup_imagination(self.dreaming_batch_size, obs_sample, action_sample,self.batch_length) 
+                        pred_obs, _,_, final_actions = self.worldmodel.setup_imagination(self.dreaming_batch_size, obs_sample, action_sample,self.batch_length) 
+                        # pred_obs does not include actions and commands
+                        cmd_tensor = self.env.commands[:,:3].squeeze().cuda()
+                        cmd_tensor = cmd_tensor.repeat(self.dreaming_batch_size,1,1)
                         pred_obs = pred_obs.float()
+                        pred_obs = torch.cat([pred_obs[:, :, :9],       # First 9 elements of pred_obs
+                                                    cmd_tensor,               # cmd_tensor
+                                                    pred_obs[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
+                                                    final_actions             # final_actions
+                                                    ], dim=-1)
                         pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
                         obs_sample_for_inference = torch.cat((obs_sample, pred_obs),dim=1)
                         # rollout the world model
@@ -398,7 +420,11 @@ class OnPolicy_WM_Runner_Val:
                             # use the sampled action to do roll outs in the world model
                             #=============Step using the world model=============
                             pred_obs, critic_obs_sample, reward_sample, termination_sample = self.worldmodel.imagine_step(batch_size, obs_sample, action_sample, reward_sample, termination_sample, imag_step)
-
+                            pred_obs = torch.cat([pred_obs[:, :, :9],       # First 9 elements of pred_obs
+                                                    cmd_tensor,               # cmd_tensor
+                                                    pred_obs[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
+                                                    actions.unsqueeze(dim=1)  # final_actions
+                                                    ], dim=-1)
                             pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
                             pred_obs, pred_critic_obs = pred_obs.to(self.device,dtype=torch.float), pred_critic_obs.to(self.device,dtype=torch.float)
                             rewards, dones = reward_sample.to(self.device,dtype=torch.float).squeeze(), termination_sample.to(self.device,dtype=torch.float).squeeze()
@@ -465,6 +491,7 @@ class OnPolicy_WM_Runner_Val:
 
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
+        self.writer.add_scalar('test_policy/episodic_reward', locs['record_episodic_reward'], locs['it'])
         if locs['mean_value_loss_wm'] is not None:
             self.writer.add_scalar('Loss/value_function_wm', locs['mean_value_loss_wm'], locs['it'])
             self.writer.add_scalar('Loss/surrogate_wm', locs['mean_surrogate_loss_wm'], locs['it'])

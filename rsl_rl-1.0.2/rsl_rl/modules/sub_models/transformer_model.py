@@ -89,6 +89,10 @@ class StochasticTransformerKVCache(nn.Module):
         Forward pass with kv_cache, cache stored in self.kv_cache_list
         '''
         assert samples.shape[1] == 1
+        if self.kv_cache_list[0].shape[1] == self.position_encoding.max_length:
+            # exceed max length, shift the cache
+            for i, _ in enumerate(self.layer_stack):
+                self.kv_cache_list[i] = self.kv_cache_list[i][:, 1:, :]
         mask = get_vector_mask(self.kv_cache_list[0].shape[1]+1, samples.device)
 
         # action = F.one_hot(action.long(), self.action_dim).float()

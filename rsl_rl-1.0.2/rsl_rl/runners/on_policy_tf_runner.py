@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel
+from rsl_rl.modules.sub_models.world_models import WorldModel_normal, WorldModel
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq
@@ -48,6 +48,18 @@ from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_s
 def build_world_model(in_channels, action_dim, twm_cfg):
     return WorldModel(
         in_channels=in_channels,
+        decoder_out_channels = in_channels - 15,
+        action_dim=action_dim,
+        transformer_max_length = twm_cfg["twm_max_len"],
+        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
+        transformer_num_layers = twm_cfg["twm_num_layers"],
+        transformer_num_heads = twm_cfg["twm_num_heads"]
+    ).cuda()
+
+def build_world_model_normal(in_channels, action_dim, twm_cfg):
+    return WorldModel_normal(
+        in_channels=in_channels,
+        decoder_out_channels=in_channels - 15,# remove actions (12) and commands (3)
         action_dim=action_dim,
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
@@ -99,7 +111,8 @@ class OnPolicy_WM_Runner:
             self.num_critic_obs = self.env.num_privileged_obs 
         else:
             self.num_critic_obs = self.env.num_obs
-        self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+        # self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+        self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -175,7 +188,7 @@ class OnPolicy_WM_Runner:
         lenbuffer = deque(maxlen=100) # calculate mean episode length
         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current reward 
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current episode length
-
+        episodic_reward = 0
         tot_iter = self.current_learning_iteration + num_learning_iterations
         """
         The learning algorithm roughly follow the following steps:
@@ -225,7 +238,7 @@ class OnPolicy_WM_Runner:
                     # buf: (num_steps_per_env, num_envs, ...)
                     # during training, transformer should sample from the buffer with samples like
                     # sample: (batch_size, num_steps_per_env, ...)
-
+                    episodic_reward += rewards.mean().item()
                     # =============Book keeping=============
                     if self.log_dir is not None:
                         # Book keeping
@@ -260,7 +273,8 @@ class OnPolicy_WM_Runner:
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs)
-            
+            record_episodic_reward = episodic_reward/self.num_steps_per_env
+            episodic_reward = 0
             # 2. Update policy on environment data
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
@@ -387,6 +401,7 @@ class OnPolicy_WM_Runner:
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
         self.writer.add_scalar('Loss/surrogate', locs['mean_surrogate_loss'], locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
+        self.writer.add_scalar('test_policy/episodic_reward', locs['record_episodic_reward'], locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])

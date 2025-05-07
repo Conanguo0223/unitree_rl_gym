@@ -195,6 +195,7 @@ class LeggedRobot(BaseTask):
     def compute_observations(self):
         """ Computes observations
         """
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
         self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
                                     self.base_ang_vel  * self.obs_scales.ang_vel,
                                     self.projected_gravity,
@@ -202,6 +203,7 @@ class LeggedRobot(BaseTask):
                                     (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
                                     self.dof_vel * self.obs_scales.dof_vel,
                                     self.actions
+                                    # contact
                                     ),dim=-1)
         # add perceptive inputs if not blind
         if self.cfg.terrain.measure_heights:
@@ -260,6 +262,17 @@ class LeggedRobot(BaseTask):
 
             for s in range(len(props)):
                 props[s].friction = self.friction_coeffs[env_id]
+        if self.cfg.domain_rand.randomize_restitution:
+            if env_id==0:
+                # prepare friction randomization
+                restitutions_range = self.cfg.domain_rand.restitutions_range
+                num_buckets = 64
+                bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
+                restitution_buckets = torch_rand_float(restitutions_range[0], restitutions_range[1], (num_buckets,1), device='cpu')
+                self.restitution_coeffs = restitution_buckets[bucket_ids]
+
+            for s in range(len(props)):
+                props[s].restitution = self.restitution_coeffs[env_id]
         return props
 
     def _process_dof_props(self, props, env_id):
