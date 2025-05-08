@@ -32,3 +32,4 @@ from .on_policy_runner import OnPolicyRunner
 from .on_policy_tf_runner import OnPolicy_WM_Runner
 from .on_policy_tf_runner_val import OnPolicy_WM_Runner_Val
 from .on_policy_tf_runner_train import OnPolicy_WM_Runner_train
+from .on_policy_gru_runner_train import OnPolicy_GRU_Runner_train

@@ -13,9 +13,11 @@ def train(args):
     ppo_runner, train_cfg, train_cfg_save, log_dir = task_registry.make_alg_runner(env=env, name=args.task, args=args)
     # save files before training
     # Save dictionary to a JSON file
-    with open(log_dir+"env_config.json", "w") as json_file:
+    env_dir = os.path.join(log_dir, "env_config.json")
+    train_dir = os.path.join(log_dir, "train_config.json")
+    with open(env_dir, "w") as json_file:
         json.dump(env_cfg_save, json_file)
-    with open(log_dir+"train_config.json", "w") as json_file:
+    with open(train_dir, "w") as json_file:
         json.dump(train_cfg_save, json_file)
     print("saved configs")
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)

@@ -1090,7 +1090,7 @@ class WorldModel_normal(nn.Module):
             # writer.add_scalar("tokenizer/var_post", var_post.item(), it)
 
 class WorldModel_GRU(nn.Module):
-    def __init__(self, obs_dim, action_dim, decoder_out_channels, gru_hidden_size=256, mlp_hidden_size=128):
+    def __init__(self, obs_dim, decoder_out_channels, gru_hidden_size=256, mlp_hidden_size=128):
         """
         Args:
             in_channels (int): Number of input features (observations).
@@ -1100,12 +1100,11 @@ class WorldModel_GRU(nn.Module):
         """
         super().__init__()
         self.obs_dim = obs_dim
-        self.action_dim = action_dim
         self.mlp_hidden_size = mlp_hidden_size
         self.decoder_out_channels = decoder_out_channels
         self.gru_hidden_size = gru_hidden_size
         # GRU: Processes sequential data
-        self.gru = nn.GRU(input_size=obs_dim+action_dim, hidden_size=gru_hidden_size, num_layers=2, batch_first=True)
+        self.gru = nn.GRU(input_size=obs_dim, hidden_size=gru_hidden_size, num_layers=2, batch_first=True)
         
         # MLP heads for observation and contact prediction (mean and variance)
         self.obs_head = nn.Sequential(
@@ -1113,15 +1112,8 @@ class WorldModel_GRU(nn.Module):
             nn.ReLU(),
             nn.Linear(mlp_hidden_size, 2*decoder_out_channels)
         )
-        # Encoder: Linear layer to process input features
-        self.encoder = nn.Linear(in_channels, gru_hidden_size)
 
-        
-
-        # Decoder: Linear layer to reconstruct the next observation
-        self.decoder = nn.Linear(gru_hidden_size, decoder_out_channels)
-
-    def forward(self, obs, action, hidden_state=None):
+    def forward(self, obs_sequence, action_sequence):
         """
         Forward pass for the GRU-based world model.
 
@@ -1136,38 +1128,39 @@ class WorldModel_GRU(nn.Module):
             termination_hat (Tensor): Predicted termination signals of shape (batch_size, seq_length, 1).
             hidden_state (Tensor): Final hidden state of the GRU.
         """
-        # Concatenate observations and actions along the feature dimension
-        x = torch.cat([obs, action], dim=-1)
-
         # Encode input features
-        x = self.encoder(x)
+        out, h = self.gru(obs_sequence)
 
-        # Pass through GRU
-        x, hidden_state = self.gru(x, hidden_state)
-
-        # Decode outputs
-        obs_hat = self.decoder(x)  # Predict next observations
-        reward_hat = self.reward_decoder(x)  # Predict rewards
-        termination_hat = self.termination_decoder(x)  # Predict termination signals
-
-        return obs_hat, reward_hat, termination_hat, hidden_state
+        last_h = out[:,-1]
+        obs_hat = self.obs_head(last_h)
+        
+        mu_o, logvar_o = torch.chunk(obs_hat,2, dim=-1)
+        std_o = torch.exp(logvar_o)
+   
+        return mu_o, logvar_o
     
-    def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
-        self.train()
-        batch_size, batch_length = obs.shape[:2]
-        # modify the obs to not include command and actions
-        # which is obs[:, :, 9:12] and obs[:, :, 36:48]
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # encoding
-            embedding = self.encoder(obs)
-            # Pass through GRU
-            x, hidden_state = self.gru(x, hidden_state)
-            flattened_sample = self.reparameterize(mu_post, var_post)
-            # flattened_sample = self.flatten_sample(sample)
+    def autoregressive_training_step(model, obs, M=32, N=8, alpha=1.0):
+        """
+        model: RWMGRUWorldModel
+        obs: (B, T, D)
+        act: (B, T, A)
+        contact: (B, T, 8)
+        """
+        B, T, _ = obs.shape
+        total_loss = 0
+        count = 0
 
-            # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
+        for t in range(T - (M + N) + 1):
+            obs_window = obs[:, t:t+M+N]    # (B, M+N, D)
+            for k in range(1, N+1):
+                obs_in = obs_window[:, k-1:M+k-1]   # (B, M, D)
+                target_obs = obs_window[:, M+k-1]   # (B, D)
 
-            # transformer
+                mu_o, std_o, mu_c, std_c = model(obs_in)
+
+                loss_obs = F.mse_loss(mu_o, target_obs)
+                loss_contact = F.mse_loss(mu_c, target_obs[:, -8:])
+                total_loss += alpha * (loss_obs + loss_contact)
+                count += 1
+
+        return total_loss / count
