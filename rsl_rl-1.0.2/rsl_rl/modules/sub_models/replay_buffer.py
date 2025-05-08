@@ -226,3 +226,82 @@ class ReplayBuffer_seq():
     def __len__(self):
         return self.actual_max_length if self.full else self.current_index
 
+# saves exeperience per time sequence
+class ReplayBuffer_seq_new():
+    def __init__(self, obs_shape, priv_obs_shape, action_shape, num_envs, num_steps_per_env, max_length=128000, warmup_length=50000, store_on_gpu=False) -> None:
+        self.store_on_gpu = store_on_gpu
+        self.max_length = max_length
+        self.device = "cuda" if store_on_gpu else "cpu"
+        self.obs_buffer = torch.empty((max_length, num_steps_per_env, *obs_shape), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.priv_obs_buffer = torch.empty((max_length, num_steps_per_env, *priv_obs_shape), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.action_buffer = torch.empty((max_length, num_steps_per_env, *action_shape), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.reward_buffer = torch.empty((max_length, num_steps_per_env), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.termination_buffer = torch.empty((max_length, num_steps_per_env), dtype=torch.bool, device=self.device, requires_grad=False)
+  
+        self.length = 0
+        self.num_envs = num_envs
+        self.current_index = 0
+        self.max_length = max_length
+        self.warmup_length = warmup_length
+        self.external_buffer_length = None
+        self.num_steps_per_env = num_steps_per_env
+        self.full = False
+        
+    def ready(self):
+        return self.length > self.warmup_length
+
+    @torch.no_grad()
+    def sample(self, batch_size, batch_length, to_device="cuda"):
+        max_index = self.max_length if self.full else self.current_index
+        indices = torch.randint(0, max_index, (batch_size,), device=to_device)
+        time_indices = torch.randint(0, self.num_steps_per_env-batch_length, (batch_size,), device=to_device)
+        obs = self.obs_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
+        priv_obs = self.priv_obs_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
+        action = self.action_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
+        reward = self.reward_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
+        termination = self.termination_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
+
+        return obs, priv_obs, action, reward, termination
+
+    def append(self, obs, priv_obs, action, reward, termination):
+        # obs/nex_obs: torch Tensor
+        # action/reward/termination: int or float or bool
+        # if the total length is reached, the first data is cleared and the new data is added
+        # handle the overflow by wrapping around
+        batch_size = obs.shape[0]
+        end_index = self.current_index + batch_size
+
+        if self.store_on_gpu:
+            if end_index > self.max_length:
+                overflow = end_index - self.max_length
+                # store the buffer from current_index~end with obs from 0~batch_size-overflow
+                self.obs_buffer[self.current_index:] = obs[:batch_size-overflow]
+                self.priv_obs_buffer[self.current_index:] = priv_obs[:batch_size-overflow]
+                self.action_buffer[self.current_index:] = action[:batch_size-overflow]
+                self.reward_buffer[self.current_index:] = reward[:batch_size-overflow]
+                self.termination_buffer[self.current_index:] = termination[:batch_size-overflow]
+                # store the buffer from 0~overflow with obs from batch_size-overflow~end
+                self.obs_buffer[:overflow] = obs[batch_size-overflow:]
+                self.priv_obs_buffer[:overflow] = priv_obs[batch_size-overflow:]
+                self.action_buffer[:overflow] = action[batch_size-overflow:]
+                self.reward_buffer[:overflow] = reward[batch_size-overflow:]
+                self.termination_buffer[:overflow] = termination[batch_size-overflow:]
+            else:
+                self.obs_buffer[self.current_index:end_index] = obs
+                self.priv_obs_buffer[self.current_index:end_index] = priv_obs
+                self.action_buffer[self.current_index:end_index] = action
+                self.reward_buffer[self.current_index:end_index] = reward
+                self.termination_buffer[self.current_index:end_index] = termination
+        else:
+            pass
+        self.current_index += batch_size
+        if end_index >= self.max_length:
+            self.current_index = end_index % self.max_length
+            self.full = True
+
+        if len(self) < self.max_length:
+            self.length += 1
+
+    def __len__(self):
+        return self.max_length if self.full else self.current_index
+

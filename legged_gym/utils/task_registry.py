@@ -9,6 +9,7 @@ from rsl_rl.env import VecEnv
 from rsl_rl.runners import OnPolicyRunner
 from rsl_rl.runners import OnPolicy_WM_Runner
 from rsl_rl.runners import OnPolicy_WM_Runner_Val
+from rsl_rl.runners import OnPolicy_WM_Runner_train
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, LEGGED_GYM_ENVS_DIR
 from .helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed, parse_sim_params
@@ -72,7 +73,8 @@ class TaskRegistry():
                             physics_engine=args.physics_engine,
                             sim_device=args.sim_device,
                             headless=args.headless)
-        return env, env_cfg
+        env_cfg_save = class_to_dict(env_cfg)
+        return env, env_cfg_save
 
     def make_alg_runner(self, env, name=None, args=None, train_cfg=None, log_root="default") -> Tuple[OnPolicyRunner, LeggedRobotCfgPPO]:
         """ Creates the training algorithm  either from a registered namme or from the provided config file.
@@ -120,12 +122,13 @@ class TaskRegistry():
         # original runner
         if "twm" not in name:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        elif "val" not in name:
+        elif name == "go2_twm":
             # world model runner 
             runner = OnPolicy_WM_Runner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        else:
+        elif name == "go2_twm_val":
             runner = OnPolicy_WM_Runner_Val(env, train_cfg_dict, log_dir, device=args.rl_device)
-
+        elif name == "go2_twm_train":
+            runner = OnPolicy_WM_Runner_train(env, train_cfg_dict, log_dir, device=args.rl_device)
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:
@@ -134,7 +137,7 @@ class TaskRegistry():
             resume_path = "/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM/May08_10-41-46_/model_5000.pt"
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path)
-        return runner, train_cfg
+        return runner, train_cfg, train_cfg_dict, log_dir
 
 # make global task registry
 task_registry = TaskRegistry()

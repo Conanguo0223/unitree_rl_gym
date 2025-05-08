@@ -1090,7 +1090,7 @@ class WorldModel_normal(nn.Module):
             # writer.add_scalar("tokenizer/var_post", var_post.item(), it)
 
 class WorldModel_GRU(nn.Module):
-    def __init__(self, in_channels, gru_hidden_size, mlp_hidden_size, decoder_out_channels):
+    def __init__(self, obs_dim, action_dim, decoder_out_channels, gru_hidden_size=256, mlp_hidden_size=128):
         """
         Args:
             in_channels (int): Number of input features (observations).
@@ -1099,13 +1099,24 @@ class WorldModel_GRU(nn.Module):
             decoder_out_channels (int): Number of output features (predicted observations).
         """
         super().__init__()
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.mlp_hidden_size = mlp_hidden_size
+        self.decoder_out_channels = decoder_out_channels
         self.gru_hidden_size = gru_hidden_size
-
+        # GRU: Processes sequential data
+        self.gru = nn.GRU(input_size=obs_dim+action_dim, hidden_size=gru_hidden_size, num_layers=2, batch_first=True)
+        
+        # MLP heads for observation and contact prediction (mean and variance)
+        self.obs_head = nn.Sequential(
+            nn.Linear(gru_hidden_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden_size, 2*decoder_out_channels)
+        )
         # Encoder: Linear layer to process input features
         self.encoder = nn.Linear(in_channels, gru_hidden_size)
 
-        # GRU: Processes sequential data
-        self.gru = nn.GRU(input_size=gru_hidden_size, hidden_size=gru_hidden_size, batch_first=True)
+        
 
         # Decoder: Linear layer to reconstruct the next observation
         self.decoder = nn.Linear(gru_hidden_size, decoder_out_channels)
