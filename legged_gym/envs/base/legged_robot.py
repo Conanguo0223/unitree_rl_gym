@@ -208,8 +208,18 @@ class LeggedRobot(BaseTask):
                                     ),dim=-1)
         # observations for the world model
         # (base_lin_vel, base_ang_vel, projected_gravity, dof_pos, dof_vel, actions[torques], penalize_contacts, foot_contacts)   
-        self.privileged_obs_buf = torch.cat((self.obs_buf[:,:9],self.obs_buf[:,12:], penalized_contacts, foot_contact),dim=-1)
-        
+        self.privileged_obs_buf = torch.cat((self.obs_buf[:,:9],self.obs_buf[:,12:36],self.torques, penalized_contacts, foot_contact),dim=-1)
+        # unscaled privileged observations
+        self.privileged_obs_buf = torch.cat((  self.base_lin_vel,
+                                               self.base_ang_vel,
+                                               self.projected_gravity,
+                                               (self.dof_pos - self.default_dof_pos),
+                                                self.dof_vel,
+                                                self.torques,
+                                                penalized_contacts,
+                                                foot_contact
+                                                # contact
+                                                ),dim=-1)
         # add perceptive inputs if not blind
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
