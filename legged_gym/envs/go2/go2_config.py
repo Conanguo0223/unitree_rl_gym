@@ -493,21 +493,19 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
         imagination_horizon = 8
         learning_rate = 1e-5
         
-    class twm():
-        twm_max_len = 40
-        twm_hidden_dim = 64 
-        twm_num_layers = 2
-        twm_num_heads = 8
-        twm_train_steps = 1 # train the transformer per this many steps
-        twm_start_train_steps = 0 # start training the transformer after this many steps
-        twm_start_train_policy_steps = 0 # start training the policy using dynamics after this many steps
-        twm_train_policy_steps = 2 # train the policy using dynamics per this many steps
-        dreaming_batch_size = 4096 # batch size for dreaming 
+    class gru():
+        gru_hidden_size = 256
+        mlp_hidden_size = 128
+        gru_train_steps = 1 # train the gru per this many steps
+        gru_start_train_steps = 0 # start training the gru after this many steps
+        gru_start_train_policy_steps = 10 # start training the policy using dynamics after this many steps
+        gru_train_policy_steps = 5 # train the policy using dynamics per this many steps
+        dreaming_batch_size = 1024 # batch size for dreaming 
         batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
-        train_agent_steps = 2 # train the agent this many steps using dynamics
-        train_tokenizer_times = 20
-        train_dynamic_times = 20
+        train_agent_steps = 5 # train the agent this many steps using dynamics
+        train_tokenizer_times = 10
+        train_dynamic_times = 10
         use_context = False
         
         # class Agent():
@@ -524,5 +522,5 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         num_steps_per_env = 400 # per iteration
-        experiment_name = 'rough_go2_TWM_train'
+        experiment_name = 'rough_go2_GRU_train'
         max_iterations = 5000

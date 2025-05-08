@@ -39,48 +39,19 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal
+from rsl_rl.modules.sub_models.world_models import  WorldModel_GRU
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq, ReplayBuffer_seq_new
 
 
-def build_world_model(in_channels, action_dim, twm_cfg, privileged_dim):
-    return WorldModel(
-        in_channels=in_channels,
-        decoder_out_channels = privileged_dim,
-        action_dim=action_dim,
-        transformer_max_length = twm_cfg["twm_max_len"],
-        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
-        transformer_num_layers = twm_cfg["twm_num_layers"],
-        transformer_num_heads = twm_cfg["twm_num_heads"]
-    ).cuda()
-
-def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
-    return WorldModel_normal(
-        in_channels=in_channels,
-        decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
-        action_dim=action_dim,
-        transformer_max_length = twm_cfg["twm_max_len"],
-        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
-        transformer_num_layers = twm_cfg["twm_num_layers"],
-        transformer_num_heads = twm_cfg["twm_num_heads"]
-    ).cuda()
-
-def build_world_model_gru
-
-def imagine_one_step(worldmodel: WorldModel, sample_obs, sample_action):
-    # use the observations sampled from the replay buffer to generate the next observation
-    # sample_obs: (batch_size, num_steps, num_envs, num_obs)
-    context_latent_flattened = worldmodel.encode_obs(sample_obs) # flattend latent
-    for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
-        # remember to turn the model to eval mode
-        last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = worldmodel.predict_next(
-            context_latent_flattened[:, i:i+1],
-            sample_action[:, i:i+1],
-            log_video=False
-        )
-
+def build_world_model_gru(in_channels, gru_cfg, privileged_dim):
+    return WorldModel_GRU(
+        obs_dim=in_channels,
+        decoder_out_channels=privileged_dim,
+        gru_hidden_size=gru_cfg['gru_hidden_size'],
+        mlp_hidden_size=gru_cfg['mlp_hidden_size'],
+    )
 
 class OnPolicy_GRU_Runner_train:
 
@@ -94,7 +65,7 @@ class OnPolicy_GRU_Runner_train:
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         self.rply_buff = train_cfg["buffer"]
-        self.twm_cfg = train_cfg["twm"]
+        self.gru_cfg = train_cfg["gru"]
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
@@ -103,7 +74,7 @@ class OnPolicy_GRU_Runner_train:
         else:
             self.num_critic_obs = self.env.num_obs
         self.num_critic_obs = self.env.num_obs
-        self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
+        self.worldmodel = build_world_model_gru(self.env.num_obs, self.gru_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -144,16 +115,16 @@ class OnPolicy_GRU_Runner_train:
         
 
         # world model training parameters
-        self.train_dynamics_steps = self.twm_cfg["twm_train_steps"]
-        self.start_train_dynamics_steps = self.twm_cfg["twm_start_train_steps"]
-        self.start_train_using_dynamics_steps = self.twm_cfg["twm_start_train_policy_steps"]
-        self.train_tw_policy_steps = self.twm_cfg["twm_train_policy_steps"]
-        self.dreaming_batch_size = self.twm_cfg["dreaming_batch_size"]
-        self.batch_length = self.twm_cfg["batch_length"]
-        self.demonstration_batch_size = self.twm_cfg["demonstration_batch_size"]
-        self.train_agent_steps = self.twm_cfg["train_agent_steps"]
-        self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
-        self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
+        self.train_dynamics_steps = self.gru_cfg["gru_train_steps"]
+        self.start_train_dynamics_steps = self.gru_cfg["gru_start_train_steps"]
+        self.start_train_using_dynamics_steps = self.gru_cfg["gru_start_train_policy_steps"]
+        self.train_tw_policy_steps = self.gru_cfg["gru_train_policy_steps"]
+        self.dreaming_batch_size = self.gru_cfg["dreaming_batch_size"]
+        self.batch_length = self.gru_cfg["batch_length"]
+        self.demonstration_batch_size = self.gru_cfg["demonstration_batch_size"]
+        self.train_agent_steps = self.gru_cfg["train_agent_steps"]
+        self.train_tokenizer_times = self.gru_cfg["train_tokenizer_times"]
+        self.train_dynamics_times = self.gru_cfg["train_dynamic_times"]
         # init storage and model for the policy
         # self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions], self.dreaming_batch_size)
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [0], [self.env.num_actions])
@@ -270,22 +241,13 @@ class OnPolicy_GRU_Runner_train:
                     batch_size = self.replay_buffer.current_index
                 for it_tok in range(self.train_tokenizer_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.batch_length)
+                    self.worldmodel.autoregressive_training_step(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     # (batch, time, feature)
-                    if it_tok < self.train_tokenizer_times-1:
-                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
-                    else:
-                        # only log the final one
-                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
-                
-                # 3-2 train dynamics
-                for it_wm in range(self.train_dynamics_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.batch_length)
-                    if it_wm < self.train_dynamics_times-1:
-                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
-                    else:
-                        # only log the final one
-                        current_obs_loss = self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer, return_loss=True)
-            stop = time.time()
+                    # if it_tok < self.train_tokenizer_times-1:
+                    #     self.worldmodel.autoregressive_training_step(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
+                    # else:
+                    #     # only log the final one
+                    #     self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
             learn_WM_time = stop - start
             # =============end updating world model=============            
 

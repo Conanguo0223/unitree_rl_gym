@@ -120,16 +120,19 @@ class TaskRegistry():
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
         
         train_cfg_dict = class_to_dict(train_cfg)
-        # original runner
-        if "twm" not in name:
-            runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
-        elif name == "go2_twm":
+        
+        if name == "go2_twm":
             # world model runner 
             runner = OnPolicy_WM_Runner(env, train_cfg_dict, log_dir, device=args.rl_device)
         elif name == "go2_twm_val":
             runner = OnPolicy_WM_Runner_Val(env, train_cfg_dict, log_dir, device=args.rl_device)
         elif name == "go2_twm_train":
             runner = OnPolicy_WM_Runner_train(env, train_cfg_dict, log_dir, device=args.rl_device)
+        elif name == "go2_gru_train":
+            runner = OnPolicy_GRU_Runner_train(env, train_cfg_dict, log_dir, device=args.rl_device)
+        else:
+            # original runner
+            runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:

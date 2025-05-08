@@ -1139,7 +1139,7 @@ class WorldModel_GRU(nn.Module):
    
         return mu_o, logvar_o
     
-    def autoregressive_training_step(model, obs, M=32, N=8, alpha=1.0):
+    def autoregressive_training_step(self, obs, M=32, N=8, alpha=1.0, writer=None,it=0):
         """
         model: RWMGRUWorldModel
         obs: (B, T, D)
@@ -1155,12 +1155,22 @@ class WorldModel_GRU(nn.Module):
             for k in range(1, N+1):
                 obs_in = obs_window[:, k-1:M+k-1]   # (B, M, D)
                 target_obs = obs_window[:, M+k-1]   # (B, D)
+                out, h = self.gru(obs_in)
 
-                mu_o, std_o, mu_c, std_c = model(obs_in)
+                last_h = out[:,-1]
+                obs_hat = self.obs_head(last_h)
+                
+                mu_o, logvar_o = torch.chunk(obs_hat,2, dim=-1)
+                std_o = torch.exp(logvar_o)
 
-                loss_obs = F.mse_loss(mu_o, target_obs)
-                loss_contact = F.mse_loss(mu_c, target_obs[:, -8:])
+                loss_obs = F.mse_loss(mu_o[:,:-8], target_obs)
+                loss_contact = F.mse_loss(mu_o[:,-8:], target_obs[:, -8:])
                 total_loss += alpha * (loss_obs + loss_contact)
                 count += 1
-
+        if writer is not None and it > 0:
+            writer.add_scalar("WorldModel/tokenizer/reconstruction_loss", reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/tokenizer/reconstruction_loss_out", reconstruction_loss_out.item(), it)
+            writer.add_scalar("WorldModel/tokenizer/reward_loss", reward_loss.item(), it)
+            writer.add_scalar("WorldModel/tokenizer/termination_loss", termination_loss.item(), it)
+            writer.add_scalar("WorldModel/tokenizer/total_loss", total_loss.item(), it)
         return total_loss / count
