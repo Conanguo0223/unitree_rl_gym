@@ -45,10 +45,17 @@ from rsl_rl.modules.sub_models.functions_losses import symexp
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq
 
 
+<<<<<<< HEAD
 def build_world_model(in_channels, action_dim, twm_cfg):
     return WorldModel(
         in_channels=in_channels,
         decoder_out_channels = in_channels - 15,
+=======
+def build_world_model(in_channels, action_dim, twm_cfg, privileged_dim):
+    return WorldModel(
+        in_channels=in_channels,
+        decoder_out_channels = privileged_dim,
+>>>>>>> c3a391c (first_commit on ws1)
         action_dim=action_dim,
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
@@ -56,10 +63,17 @@ def build_world_model(in_channels, action_dim, twm_cfg):
         transformer_num_heads = twm_cfg["twm_num_heads"]
     ).cuda()
 
+<<<<<<< HEAD
 def build_world_model_normal(in_channels, action_dim, twm_cfg):
     return WorldModel_normal(
         in_channels=in_channels,
         decoder_out_channels=in_channels - 15,# remove actions (12) and commands (3)
+=======
+def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
+    return WorldModel_normal(
+        in_channels=in_channels,
+        decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
+>>>>>>> c3a391c (first_commit on ws1)
         action_dim=action_dim,
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
@@ -108,11 +122,20 @@ class OnPolicy_WM_Runner:
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
+<<<<<<< HEAD
             self.num_critic_obs = self.env.num_privileged_obs 
         else:
             self.num_critic_obs = self.env.num_obs
         # self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
         self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+=======
+            # self.num_critic_obs = self.env.num_privileged_obs 
+            self.num_critic_obs = self.env.num_obs
+        else:
+            self.num_critic_obs = self.env.num_obs
+        # self.worldmodel = build_world_model(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+        self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg,privileged_dim = self.env.num_privileged_obs)
+>>>>>>> c3a391c (first_commit on ws1)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -130,7 +153,11 @@ class OnPolicy_WM_Runner:
         self.save_interval = self.cfg["save_interval"] 
         self.replay_buffer = ReplayBuffer_seq(
             obs_shape = (self.env.num_obs,),
+<<<<<<< HEAD
             priv_obs_shape = (self.num_critic_obs,),
+=======
+            priv_obs_shape = (self.env.num_privileged_obs,),
+>>>>>>> c3a391c (first_commit on ws1)
             action_shape=(self.env.num_actions,),
             num_steps_per_env = self.num_steps_per_env,
             num_envs = self.env.num_envs,
@@ -153,7 +180,12 @@ class OnPolicy_WM_Runner:
         self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
         self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
         # init storage and model for the policy
+<<<<<<< HEAD
         self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions], self.dreaming_batch_size)
+=======
+        # self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions], self.dreaming_batch_size)
+        self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [None], [self.env.num_actions], self.dreaming_batch_size)
+>>>>>>> c3a391c (first_commit on ws1)
 
         # Log
         self.log_dir = log_dir
@@ -178,7 +210,12 @@ class OnPolicy_WM_Runner:
         
         dones = self.env.get_dones()
         infos = self.env.get_extra()
+<<<<<<< HEAD
         critic_obs = privileged_obs if privileged_obs is not None else obs
+=======
+        # critic_obs = privileged_obs if privileged_obs is not None else obs
+        critic_obs = obs
+>>>>>>> c3a391c (first_commit on ws1)
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         # switch the agent to train mode
         self.alg.actor_critic.train()
@@ -202,7 +239,11 @@ class OnPolicy_WM_Runner:
             # 1. Collect num_steps_per_env steps of experience from the environment.
             with torch.inference_mode():
                 obs_buf = []
+<<<<<<< HEAD
                 critic_obs_buf = []
+=======
+                privileged_buf = []
+>>>>>>> c3a391c (first_commit on ws1)
                 actions_buf = []
                 reward_buf = []
                 dones_buf = []
@@ -219,9 +260,16 @@ class OnPolicy_WM_Runner:
                     
                     # =============Step the environment=============
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
+<<<<<<< HEAD
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                     
+=======
+                    # critic_obs = privileged_obs if privileged_obs is not None else obs
+                    critic_obs = obs
+                    obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                    privileged_obs = privileged_obs.to(self.device) if privileged_obs is not None else None
+>>>>>>> c3a391c (first_commit on ws1)
                     # =============Store in replay buffer=============                    
                     # save rewards and dones to the internal buffer for policy update
                     self.alg.process_env_step(rewards, dones, infos)
@@ -229,7 +277,11 @@ class OnPolicy_WM_Runner:
                     # there could be different types for saving the experience
                     # aggregated, or not aggregated
                     obs_buf.append(obs)
+<<<<<<< HEAD
                     critic_obs_buf.append(critic_obs)
+=======
+                    privileged_buf.append(privileged_obs)
+>>>>>>> c3a391c (first_commit on ws1)
                     actions_buf.append(actions)
                     reward_buf.append(rewards)
                     dones_buf.append(dones)
@@ -254,18 +306,30 @@ class OnPolicy_WM_Runner:
 
                 # save the experience to the replay buffer
                 obs_buf = torch.stack(obs_buf, dim=0)
+<<<<<<< HEAD
                 critic_obs_buf = torch.stack(critic_obs_buf, dim=0)
+=======
+                privileged_buf = torch.stack(privileged_buf, dim=0)
+>>>>>>> c3a391c (first_commit on ws1)
                 actions_buf = torch.stack(actions_buf, dim=0)
                 reward_buf = torch.stack(reward_buf, dim=0)
                 dones_buf = torch.stack(dones_buf, dim=0)
 
                 # rearrange the buffer to be (num_envs, num_steps_per_env, ...)
                 obs_buf = rearrange(obs_buf,"T N F -> N T F")
+<<<<<<< HEAD
                 critic_obs_buf = rearrange(critic_obs_buf,"T N F -> N T F")
                 actions_buf = rearrange(actions_buf,"T N A -> N T A")
                 reward_buf = rearrange(reward_buf,"T N -> N T")
                 dones_buf = rearrange(dones_buf,"T N -> N T")
                 self.replay_buffer.append(obs_buf, critic_obs_buf, actions_buf, reward_buf, dones_buf)
+=======
+                privileged_buf = rearrange(privileged_buf,"T N F -> N T F")
+                actions_buf = rearrange(actions_buf,"T N A -> N T A")
+                reward_buf = rearrange(reward_buf,"T N -> N T")
+                dones_buf = rearrange(dones_buf,"T N -> N T")
+                self.replay_buffer.append(obs_buf, privileged_buf, actions_buf, reward_buf, dones_buf)
+>>>>>>> c3a391c (first_commit on ws1)
 
                 stop = time.time()
                 collection_time = stop - start
@@ -287,6 +351,7 @@ class OnPolicy_WM_Runner:
             if self.replay_buffer.ready() and it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
                 # 3-1 train tokenizer
                 for it_tok in range(self.train_tokenizer_times):
+<<<<<<< HEAD
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.num_steps_per_env)
                     # (batch, time, feature)
                     if it_tok < self.train_tokenizer_times-1:
@@ -303,6 +368,24 @@ class OnPolicy_WM_Runner:
                     else:
                         # only log the final one
                         self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+=======
+                    obs_sample, privileged_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.num_steps_per_env)
+                    # (batch, time, feature)
+                    if it_tok < self.train_tokenizer_times-1:
+                        self.worldmodel.update_tokenizer(obs_sample, privileged_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
+                    else:
+                        # only log the final one
+                        self.worldmodel.update_tokenizer(obs_sample, privileged_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+                
+                # 3-2 train dynamics
+                for it_wm in range(self.train_dynamics_times):
+                    obs_sample, privileged_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(self.dreaming_batch_size, self.demonstration_batch_size, self.num_steps_per_env)
+                    if it_wm < self.train_dynamics_times-1:
+                        self.worldmodel.update(obs_sample, privileged_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
+                    else:
+                        # only log the final one
+                        self.worldmodel.update(obs_sample, privileged_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+>>>>>>> c3a391c (first_commit on ws1)
             stop = time.time()
             learn_WM_time = stop - start
             # =============end updating world model=============            

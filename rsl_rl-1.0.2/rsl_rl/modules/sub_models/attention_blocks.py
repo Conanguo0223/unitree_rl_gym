@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+<<<<<<< HEAD
+=======
+import math
+>>>>>>> c3a391c (first_commit on ws1)
 from einops import rearrange, repeat
 
 
@@ -170,3 +174,99 @@ class PositionalEncoding1D(nn.Module):
 
         feat = feat + pos_emb[:, position:position+1, :]
         return feat
+<<<<<<< HEAD
+=======
+
+def get_emb(sin_inp):
+    """
+    Gets a base embedding for one dimension with sin and cos intertwined
+    """
+    emb = torch.stack((sin_inp.sin(), sin_inp.cos()), dim=-1)
+    return torch.flatten(emb, -2, -1)
+
+
+class PositionalEncoding1D_sin(nn.Module):
+    def __init__(self, channels, dtype_override=None):
+        """
+        :param channels: The last dimension of the tensor you want to apply pos emb to.
+        :param dtype_override: If set, overrides the dtype of the output embedding.
+        """
+        super(PositionalEncoding1D, self).__init__()
+        self.org_channels = channels
+        channels = int(np.ceil(channels / 2) * 2)
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, channels, 2).float() / channels))
+        self.register_buffer("inv_freq", inv_freq)
+        self.register_buffer("cached_penc", None, persistent=False)
+        self.channels = channels
+        self.dtype_override = dtype_override
+
+    def forward(self, tensor):
+        """
+        :param tensor: A 3d tensor of size (batch_size, x, ch)
+        :return: Positional Encoding Matrix of size (batch_size, x, ch)
+        """
+        if len(tensor.shape) != 3:
+            raise RuntimeError("The input tensor has to be 3d!")
+
+        if self.cached_penc is not None and self.cached_penc.shape == tensor.shape:
+            return self.cached_penc
+
+        self.cached_penc = None
+        batch_size, x, orig_ch = tensor.shape
+        pos_x = torch.arange(x, device=tensor.device, dtype=self.inv_freq.dtype)
+        sin_inp_x = torch.einsum("i,j->ij", pos_x, self.inv_freq)
+        emb_x = get_emb(sin_inp_x)
+        emb = torch.zeros(
+            (x, self.channels),
+            device=tensor.device,
+            dtype=(
+                self.dtype_override if self.dtype_override is not None else tensor.dtype
+            ),
+        )
+        emb[:, : self.channels] = emb_x
+
+        self.cached_penc = emb[None, :, :orig_ch].repeat(batch_size, 1, 1)
+        return self.cached_penc
+    
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, embed_dim, max_length=5000):
+        """
+        Args:
+            embed_dim (int): The dimension of the embeddings.
+            max_length (int): The maximum length of the input sequence.
+        """
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.max_length = max_length
+        # Create a matrix of shape (max_length, embed_dim)
+        position = torch.arange(0, self.max_length).unsqueeze(1)  # Shape: (max_length, 1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2) * -(math.log(10000.0) / embed_dim))  # Shape: (embed_dim/2)
+
+        # Compute sinusoidal values
+        pe = torch.zeros(self.max_length, embed_dim)
+        pe[:, 0::2] = torch.sin(position * div_term)  # Apply sine to even indices
+        pe[:, 1::2] = torch.cos(position * div_term)  # Apply cosine to odd indices
+
+        # Register as a buffer (non-trainable parameter)
+        self.register_buffer('pe', pe.unsqueeze(0))  # Shape: (1, max_length, embed_dim)
+
+    def forward(self, x):
+        """
+        Args:
+            x (Tensor): Input tensor of shape (batch_size, seq_length, embed_dim).
+        Returns:
+            Tensor: Positional encoding added to the input tensor.
+        """
+        seq_length = x.size(1)
+        return x + self.pe[:, :seq_length, :]
+
+    def forward_with_position(self, x, position):
+        """
+        Args:
+            x (Tensor): Input tensor of shape (batch_size, seq_length, embed_dim).
+            position (int): The position to add the positional encoding.
+        Returns:
+            Tensor: Positional encoding added to the input tensor.
+        """
+        return x + self.pe[:, position:position+1, :]
+>>>>>>> c3a391c (first_commit on ws1)

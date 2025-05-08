@@ -195,7 +195,12 @@ class LeggedRobot(BaseTask):
     def compute_observations(self):
         """ Computes observations
         """
+<<<<<<< HEAD
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+=======
+        foot_contact = (torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) > 1.)
+        penalized_contacts = (torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1)
+>>>>>>> c3a391c (first_commit on ws1)
         self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
                                     self.base_ang_vel  * self.obs_scales.ang_vel,
                                     self.projected_gravity,
@@ -205,6 +210,13 @@ class LeggedRobot(BaseTask):
                                     self.actions
                                     # contact
                                     ),dim=-1)
+<<<<<<< HEAD
+=======
+        # observations for the world model
+        # (base_lin_vel, base_ang_vel, projected_gravity, dof_pos, dof_vel, actions[torques], penalize_contacts, foot_contacts)   
+        self.privileged_obs_buf = torch.cat((self.obs_buf[:,:9],self.obs_buf[:,12:], penalized_contacts, foot_contact),dim=-1)
+        
+>>>>>>> c3a391c (first_commit on ws1)
         # add perceptive inputs if not blind
         if self.cfg.terrain.measure_heights:
             heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements

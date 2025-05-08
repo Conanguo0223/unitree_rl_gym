@@ -45,10 +45,17 @@ from rsl_rl.modules.sub_models.functions_losses import symexp
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq
 
 
+<<<<<<< HEAD
 def build_world_model(in_channels, action_dim, twm_cfg):
     return WorldModel(
         in_channels=in_channels,
         decoder_out_channels=in_channels - 15,# remove actions (12) and commands (3)
+=======
+def build_world_model(in_channels, action_dim, twm_cfg, privileged_dim):
+    return WorldModel(
+        in_channels=in_channels,
+        decoder_out_channels = privileged_dim,
+>>>>>>> c3a391c (first_commit on ws1)
         action_dim=action_dim,
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
@@ -56,10 +63,17 @@ def build_world_model(in_channels, action_dim, twm_cfg):
         transformer_num_heads = twm_cfg["twm_num_heads"]
     ).cuda()
 
+<<<<<<< HEAD
 def build_world_model_normal(in_channels, action_dim, twm_cfg):
     return WorldModel_normal(
         in_channels=in_channels,
         decoder_out_channels=in_channels - 15,# remove actions (12) and commands (3)
+=======
+def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
+    return WorldModel_normal(
+        in_channels=in_channels,
+        decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
+>>>>>>> c3a391c (first_commit on ws1)
         action_dim=action_dim,
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
@@ -143,10 +157,19 @@ class OnPolicy_WM_Runner_Val:
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
+<<<<<<< HEAD
             self.num_critic_obs = self.env.num_privileged_obs 
         else:
             self.num_critic_obs = self.env.num_obs
         self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg)
+=======
+            # self.num_critic_obs = self.env.num_privileged_obs 
+            self.num_critic_obs = self.env.num_obs
+        else:
+            self.num_critic_obs = self.env.num_obs
+        self.num_critic_obs = self.env.num_obs
+        self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
+>>>>>>> c3a391c (first_commit on ws1)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -155,6 +178,7 @@ class OnPolicy_WM_Runner_Val:
                                                         self.num_critic_obs,
                                                         self.env.num_actions,
                                                         **self.policy_cfg).to(self.device)
+<<<<<<< HEAD
         load_world_model = True
         load_policy_model = True
 
@@ -163,6 +187,16 @@ class OnPolicy_WM_Runner_Val:
             print("loaded pretrained world")
         if load_policy_model:
             actor_critic.load_state_dict(torch.load("/home/conang/quadruped/unitree_rl_gym/logs/rough_go2_TWM/May05_17-18-28_modified/model_5000.pt")["model_state_dict"])
+=======
+        load_world_model = False
+        load_policy_model = False
+
+        if load_world_model:
+            self.worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym-mujoco_training/logs/rough_go2_TWM/May07_20-33-27_/world_model_3499.pt"))
+            print("loaded pretrained world")
+        if load_policy_model:
+            actor_critic.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym-mujoco_training/logs/rough_go2_TWM/May07_20-33-27_/model_3500.pt")["model_state_dict"])
+>>>>>>> c3a391c (first_commit on ws1)
             print("loaded pretrained policy")
         
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
@@ -197,8 +231,13 @@ class OnPolicy_WM_Runner_Val:
         self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
         self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
         # init storage and model for the policy
+<<<<<<< HEAD
         self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions], self.dreaming_batch_size)
 
+=======
+        # self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_privileged_obs], [self.env.num_actions], self.dreaming_batch_size)
+        self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [0], [self.env.num_actions])
+>>>>>>> c3a391c (first_commit on ws1)
         # Log
         self.log_dir = log_dir
         self.writer = None
@@ -220,9 +259,16 @@ class OnPolicy_WM_Runner_Val:
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
         current_obs_loss = 1000
+<<<<<<< HEAD
         dones = self.env.get_dones()
         infos = self.env.get_extra()
         critic_obs = privileged_obs if privileged_obs is not None else obs
+=======
+        # dones = self.env.get_dones()
+        # infos = self.env.get_extra()
+        # critic_obs = privileged_obs if privileged_obs is not None else obs
+        critic_obs = obs
+>>>>>>> c3a391c (first_commit on ws1)
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         # switch the agent to train mode
         self.alg.actor_critic.train()
@@ -265,7 +311,12 @@ class OnPolicy_WM_Runner_Val:
                     
                     # =============Step the environment=============
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
+<<<<<<< HEAD
                     critic_obs = privileged_obs if privileged_obs is not None else obs
+=======
+                    # critic_obs = privileged_obs if privileged_obs is not None else obs
+                    critic_obs = obs
+>>>>>>> c3a391c (first_commit on ws1)
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
                     
                     # =============Store in replay buffer=============                    
@@ -410,7 +461,12 @@ class OnPolicy_WM_Runner_Val:
                                                     pred_obs[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
                                                     final_actions             # final_actions
                                                     ], dim=-1)
+<<<<<<< HEAD
                         pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
+=======
+                        # pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
+                        pred_critic_obs = pred_obs
+>>>>>>> c3a391c (first_commit on ws1)
                         obs_sample_for_inference = torch.cat((obs_sample, pred_obs),dim=1)
                         # rollout the world model
                         for imag_step in range(self.imagination_horizon):
@@ -425,7 +481,12 @@ class OnPolicy_WM_Runner_Val:
                                                     pred_obs[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
                                                     actions.unsqueeze(dim=1)  # final_actions
                                                     ], dim=-1)
+<<<<<<< HEAD
                             pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
+=======
+                            # pred_critic_obs = privileged_obs if privileged_obs is not None else pred_obs
+                            pred_critic_obs = pred_obs
+>>>>>>> c3a391c (first_commit on ws1)
                             pred_obs, pred_critic_obs = pred_obs.to(self.device,dtype=torch.float), pred_critic_obs.to(self.device,dtype=torch.float)
                             rewards, dones = reward_sample.to(self.device,dtype=torch.float).squeeze(), termination_sample.to(self.device,dtype=torch.float).squeeze()
                             # update the policy with the imagined data

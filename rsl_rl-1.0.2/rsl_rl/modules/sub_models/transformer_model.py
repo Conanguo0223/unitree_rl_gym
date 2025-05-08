@@ -4,7 +4,11 @@ import torch.nn.functional as F
 from einops import repeat, rearrange
 
 from .attention_blocks import get_vector_mask
+<<<<<<< HEAD
 from .attention_blocks import PositionalEncoding1D, AttentionBlock, AttentionBlockKVCache
+=======
+from .attention_blocks import PositionalEncoding1D,SinusoidalPositionalEncoding, PositionalEncoding1D_sin,AttentionBlock, AttentionBlockKVCache
+>>>>>>> c3a391c (first_commit on ws1)
 
 
 class StochasticTransformer(nn.Module):
@@ -49,13 +53,24 @@ class StochasticTransformerKVCache(nn.Module):
 
         # mix image_embedding and action
         self.stem = nn.Sequential(
+<<<<<<< HEAD
             nn.Linear(stoch_dim+action_dim, feat_dim, bias=False),
+=======
+            # nn.Linear(stoch_dim+action_dim, feat_dim, bias=False),
+            nn.Linear(stoch_dim, feat_dim, bias=False),
+>>>>>>> c3a391c (first_commit on ws1)
             nn.LayerNorm(feat_dim),
             nn.ReLU(inplace=True),
             nn.Linear(feat_dim, feat_dim, bias=False),
             nn.LayerNorm(feat_dim)
         )
+<<<<<<< HEAD
         self.position_encoding = PositionalEncoding1D(max_length=max_length, embed_dim=feat_dim)
+=======
+        # self.position_encoding = PositionalEncoding1D(max_length=max_length, embed_dim=feat_dim)
+        # self.position_encoding = PositionalEncoding1D_sin(channels=feat_dim)
+        self.position_encoding = SinusoidalPositionalEncoding(embed_dim=feat_dim, max_length=max_length)
+>>>>>>> c3a391c (first_commit on ws1)
         self.layer_stack = nn.ModuleList([
             AttentionBlockKVCache(feat_dim=feat_dim, hidden_dim=feat_dim*2, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)
         ])
@@ -67,7 +82,12 @@ class StochasticTransformerKVCache(nn.Module):
         '''
         # action is not one hot
         # action = F.one_hot(action.long(), self.action_dim).float() 
+<<<<<<< HEAD
         feats = self.stem(torch.cat([samples, action], dim=-1))
+=======
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.stem(samples)
+>>>>>>> c3a391c (first_commit on ws1)
         feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
 
@@ -96,7 +116,12 @@ class StochasticTransformerKVCache(nn.Module):
         mask = get_vector_mask(self.kv_cache_list[0].shape[1]+1, samples.device)
 
         # action = F.one_hot(action.long(), self.action_dim).float()
+<<<<<<< HEAD
         feats = self.stem(torch.cat([samples, action], dim=-1))
+=======
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.stem(samples)
+>>>>>>> c3a391c (first_commit on ws1)
         feats = self.position_encoding.forward_with_position(feats, position=self.kv_cache_list[0].shape[1])
         feats = self.layer_norm(feats)
 
@@ -112,7 +137,12 @@ class StochasticTransformerKVCache(nn.Module):
         '''
         # action is not one hot
         # action = F.one_hot(action.long(), self.action_dim).float() 
+<<<<<<< HEAD
         feats = self.stem(torch.cat([samples, action], dim=-1))
+=======
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.stem(samples)
+>>>>>>> c3a391c (first_commit on ws1)
         feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
 
