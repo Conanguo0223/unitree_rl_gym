@@ -161,10 +161,10 @@ class OnPolicy_WM_Runner_Val:
         load_policy_model = False
 
         if load_world_model:
-            self.worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym-mujoco_training/logs/rough_go2_TWM/May07_20-33-27_/world_model_3499.pt"))
+            self.worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM/May07_20-33-27_/world_model_3499.pt"))
             print("loaded pretrained world")
         if load_policy_model:
-            actor_critic.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym-mujoco_training/logs/rough_go2_TWM/May07_20-33-27_/model_3500.pt")["model_state_dict"])
+            actor_critic.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM/May07_20-33-27_/model_3500.pt")["model_state_dict"])
             print("loaded pretrained policy")
         
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO

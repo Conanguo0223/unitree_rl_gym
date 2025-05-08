@@ -171,8 +171,6 @@ class PositionalEncoding1D(nn.Module):
 
         feat = feat + pos_emb[:, position:position+1, :]
         return feat
-<<<<<<< HEAD
-=======
 
 def get_emb(sin_inp):
     """
@@ -266,4 +264,3 @@ class SinusoidalPositionalEncoding(nn.Module):
             Tensor: Positional encoding added to the input tensor.
         """
         return x + self.pe[:, position:position+1, :]
->>>>>>> c3a391c (first_commit on ws1)
