@@ -54,12 +54,9 @@ class GO2RoughCfgPPO( LeggedRobotCfgPPO ):
         experiment_name = 'rough_go2'
 ### ======= TWM =======
 class GO2RoughCfgTWM( LeggedRobotCfg ):
-<<<<<<< HEAD
-=======
     class env(LeggedRobotCfg.env):
         num_privileged_obs = 57 
         num_envs = 4096
->>>>>>> c3a391c (first_commit on ws1)
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
         default_joint_angles = { # = target angles [rad] when action = 0.0
@@ -96,13 +93,8 @@ class GO2RoughCfgTWM( LeggedRobotCfg ):
         heading_command = True # if true: compute ang vel command from heading error
         class ranges:
             lin_vel_x = [-1.0, 1.0] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
-<<<<<<< HEAD
-            lin_vel_y = [-1.0, 1.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0] # [-1, 1] [0.0, 0.0]   # min max [rad/s]
-=======
             lin_vel_y = [-1.0, 1.0]# [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [-1.0, 1.0]  # [-1, 1] [0.0, 0.0]   # min max [rad/s]
->>>>>>> c3a391c (first_commit on ws1)
             heading = [-3.14, 3.14] # [-3.14, 3.14] [0.0, 0.0]
     class asset( LeggedRobotCfg.asset ):
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/urdf/go2.urdf'
@@ -142,18 +134,6 @@ class GO2RoughCfgPPOTWM( LeggedRobotCfgPPO):
         imagination_horizon = 8
         
     class twm():
-<<<<<<< HEAD
-        twm_max_len = 24
-        twm_hidden_dim = 256
-        twm_num_layers = 2
-        twm_num_heads = 4
-        twm_train_steps = 2 # train the transformer per this many steps
-        twm_start_train_steps = 1000 # start training the transformer after this many steps
-        twm_start_train_policy_steps = 10# start training the policy using dynamics after this many steps
-        twm_train_policy_steps = 5 # train the policy using dynamics per this many steps
-        dreaming_batch_size = 512 # batch size for dreaming 
-        batch_length = 16
-=======
         twm_max_len = 40
         twm_hidden_dim = 64 #256
         twm_num_layers = 2
@@ -164,7 +144,6 @@ class GO2RoughCfgPPOTWM( LeggedRobotCfgPPO):
         twm_train_policy_steps = 5 # train the policy using dynamics per this many steps
         dreaming_batch_size = 1024 # batch size for dreaming 
         batch_length = 32
->>>>>>> c3a391c (first_commit on ws1)
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 5 # train the agent this many steps using dynamics
         train_tokenizer_times = 10
@@ -179,21 +158,13 @@ class GO2RoughCfgPPOTWM( LeggedRobotCfgPPO):
         #     entropyCoef = 3E-4
         #     use_context = False
     class buffer():
-<<<<<<< HEAD
-        max_len = 10000
-=======
         max_len = 1000000
->>>>>>> c3a391c (first_commit on ws1)
         BufferWarmUp = 128
         ReplayBufferOnGPU = True
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'rough_go2_TWM'
-<<<<<<< HEAD
-        num_steps_per_env = 24 # per iteration
-=======
         num_steps_per_env = 40 # per iteration
->>>>>>> c3a391c (first_commit on ws1)
         max_iterations = 5000
 
 class GO2RoughCfgTWM_val( LeggedRobotCfg ):
@@ -243,19 +214,11 @@ class GO2RoughCfgTWM_val( LeggedRobotCfg ):
             dof_pos_limits = -10.0
     class env(LeggedRobotCfg.env):
         num_envs = 1
-<<<<<<< HEAD
-    
-    class domain_rand( LeggedRobotCfg.domain_rand ):
-        randomize_friction = True
-        friction_range = [2.0, 2.0] # friction in joint
-        randomize_base_mass = False
-=======
         num_privileged_obs = 57
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True
         friction_range = [2.0, 2.0] # friction in joint
         randomize_base_mass = True
->>>>>>> c3a391c (first_commit on ws1)
         added_mass_range = [2.0, 2.0]
         push_robots = False
         push_interval_s = 15
@@ -268,11 +231,7 @@ class GO2RoughCfgTWM_val( LeggedRobotCfg ):
 
     class commands(LeggedRobotCfg.commands):
         class ranges(LeggedRobotCfg.commands.ranges):
-<<<<<<< HEAD
-            lin_vel_x = [0.5, 0.5] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
-=======
             lin_vel_x = [0.75, 0.75] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
->>>>>>> c3a391c (first_commit on ws1)
             lin_vel_y = [0.0, 0.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [0.0, 0.0] # [-1, 1] [0.0, 0.0]   # min max [rad/s]
             heading = [0.0, 0.0] # [-3.14, 3.14] [0.0, 0.0]
@@ -294,17 +253,10 @@ class GO2RoughCfgPPOTWM_val( LeggedRobotCfgPPO):
         learning_rate = 1e-5
         
     class twm():
-<<<<<<< HEAD
-        twm_max_len = 24
-        twm_hidden_dim = 256
-        twm_num_layers = 2
-        twm_num_heads = 4
-=======
         twm_max_len = 40
         twm_hidden_dim = 64 
         twm_num_layers = 2
         twm_num_heads = 8
->>>>>>> c3a391c (first_commit on ws1)
         twm_train_steps = 2 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
         twm_start_train_policy_steps = 0 # start training the policy using dynamics after this many steps

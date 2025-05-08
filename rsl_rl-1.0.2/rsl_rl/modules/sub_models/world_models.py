@@ -579,11 +579,7 @@ class WorldModel(nn.Module):
         # modify the obs to not include command and actions
         # which is obs[:, :, 9:12] and obs[:, :, 36:48]
         # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-<<<<<<< HEAD
-        obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
-=======
         # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
->>>>>>> c3a391c (first_commit on ws1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
             embedding = self.encoder(obs)
@@ -610,13 +606,8 @@ class WorldModel(nn.Module):
 
             # env loss
             # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-<<<<<<< HEAD
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs_decoder)
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], obs_decoder[:,1:,:])
-=======
             reconstruction_loss = self.mse_loss_func_obs(obs_hat, critic_obs)
             reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], critic_obs[:,1:,:])
->>>>>>> c3a391c (first_commit on ws1)
             # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
             reward_loss = self.mse_loss(reward_hat, reward)
             termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
@@ -633,11 +624,7 @@ class WorldModel(nn.Module):
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
 
-<<<<<<< HEAD
-        observation_difference = torch.abs(obs_hat - obs_decoder)
-=======
         observation_difference = torch.abs(obs_hat - critic_obs)
->>>>>>> c3a391c (first_commit on ws1)
         observation_difference = torch.flatten(observation_difference,0,1).mean(dim=0)
         base_vel_diff = observation_difference[0:3].mean()
         angle_diff = observation_difference[3:6].mean()
@@ -702,13 +689,8 @@ class WorldModel(nn.Module):
 
             # env loss
             # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-<<<<<<< HEAD
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs_decoder)
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], obs_decoder[:,1:,:])
-=======
             reconstruction_loss = self.mse_loss_func_obs(obs_hat, critic_obs)
             reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], critic_obs[:,1:,:])
->>>>>>> c3a391c (first_commit on ws1)
             # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
             reward_loss = self.mse_loss(reward_hat, reward)
             termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
@@ -755,11 +737,7 @@ class WorldModel_normal(nn.Module):
                  transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
         super().__init__()
         self.transformer_hidden_dim = transformer_hidden_dim
-<<<<<<< HEAD
-        self.feature_depth = 3
-=======
         self.feature_depth = 1 #3 
->>>>>>> c3a391c (first_commit on ws1)
         self.stoch_dim = 16
         self.stoch_flattened_dim = self.stoch_dim*self.stoch_dim
         self.use_amp = True
@@ -804,18 +782,11 @@ class WorldModel_normal(nn.Module):
         )
 
         self.mse_loss_func_obs = MSELoss()
-<<<<<<< HEAD
-        self.mse_loss = nn.MSELoss(reduction='sum')
-=======
         self.mse_loss = MSELoss()
->>>>>>> c3a391c (first_commit on ws1)
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
         # self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
         self.kl_div_loss = KLDivLoss(free_bits = 1.0)
-<<<<<<< HEAD
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-=======
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4,weight_decay=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         # scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -1174,7 +1145,6 @@ class WorldModel_normal_org(nn.Module):
         # self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
         self.kl_div_loss = KLDivLoss(free_bits = 1.0)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4,weight_decay=1e-5)
->>>>>>> c3a391c (first_commit on ws1)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         # scheduler = torch.optim.lr_scheduler.OneCycleLR(
         #                                     self.optimizer, max_lr=1e-3, total_steps=total_training_steps
@@ -1329,24 +1299,17 @@ class WorldModel_normal_org(nn.Module):
             prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
             # prior_flattened_sample = self.flatten_sample(prior_sample) 
             obs_hat = self.image_decoder(prior_flattened_sample)
-<<<<<<< HEAD
-=======
             reward_hat = self.reward_decoder(dist_feat)
             # reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
             termination_hat = self.termination_decoder(dist_feat)
             termination_hat = termination_hat > 0
 
->>>>>>> c3a391c (first_commit on ws1)
 
         # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1:,:]
         self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1:,:]
         self.hidden_buffer[:, 0:1] = dist_feat[:,-1:,:]
-<<<<<<< HEAD
-        return obs_hat[:, -1:,:], prior_flattened_sample[:,-1:,:], dist_feat[:,-1:,:], sample_action[:,-1:,:]# return the predicted observation, the flattend
-=======
         
         return obs_hat[:, -1:,:], reward_hat[:, -1:].unsqueeze(-1), termination_hat[:, -1:].unsqueeze(-1) # return the predicted observation, the flattend
->>>>>>> c3a391c (first_commit on ws1)
 
     def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
         self.train()
@@ -1354,31 +1317,21 @@ class WorldModel_normal_org(nn.Module):
         # modify the obs to not include command and actions
         # which is obs[:, :, 9:12] and obs[:, :, 36:48]
         # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-<<<<<<< HEAD
-        obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
-=======
         # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
->>>>>>> c3a391c (first_commit on ws1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
             embedding = self.encoder(obs)
             mu_post, var_post = self.dist_head_vae.forward_post_vae(embedding)
             flattened_sample = self.reparameterize(mu_post, var_post)
-<<<<<<< HEAD
-=======
 
 
->>>>>>> c3a391c (first_commit on ws1)
             # flattened_sample = self.flatten_sample(sample)
 
             # decoding image
             obs_hat = self.image_decoder(flattened_sample)
 
             # transformer
-<<<<<<< HEAD
-=======
             # TODO: change mask to allowing the first batch_length to all be true
->>>>>>> c3a391c (first_commit on ws1)
             temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
             dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
             mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
@@ -1387,18 +1340,6 @@ class WorldModel_normal_org(nn.Module):
 
             obs_hat_out = self.image_decoder(flattened_prior_sample)
             # decoding reward and termination with dist_feat
-<<<<<<< HEAD
-            reward_hat = self.reward_decoder(dist_feat)
-            termination_hat = self.termination_decoder(dist_feat)
-
-            # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs_decoder)
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], obs_decoder[:,1:,:])
-            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            reward_loss = self.mse_loss(reward_hat, reward)
-            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
-=======
             # reward_hat = self.reward_decoder(dist_feat)
             # termination_hat = self.termination_decoder(dist_feat)
 
@@ -1413,34 +1354,21 @@ class WorldModel_normal_org(nn.Module):
             # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
             # reward_loss = self.mse_loss(torch.unsqueeze(reward_hat,-1), torch.unsqueeze(reward,-1))
             # termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
->>>>>>> c3a391c (first_commit on ws1)
             # dyn-rep loss
             kl_loss, real_kl_loss = self.kl_div_loss(mu_post, var_post, mu_prior, var_prior)
             # dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
             # representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-<<<<<<< HEAD
-            total_loss = reconstruction_loss*0.75 + kl_loss + reconstruction_loss_out + reward_loss + termination_loss #+ 0.5*dynamics_loss + 0.1*representation_loss
-=======
             total_loss = reconstruction_loss + kl_loss + reconstruction_loss_out + reconstruction_loss_contact + reconstruction_loss_contact_out# + reward_loss + termination_loss #+ 0.5*dynamics_loss + 0.1*representation_loss
->>>>>>> c3a391c (first_commit on ws1)
 
         # gradient descent
         self.scaler.scale(total_loss).backward()
         self.scaler.unscale_(self.optimizer)  # for clip grad
-<<<<<<< HEAD
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
-=======
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
->>>>>>> c3a391c (first_commit on ws1)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
 
-<<<<<<< HEAD
-        observation_difference = torch.abs(obs_hat - obs_decoder)
-=======
         observation_difference = torch.abs(obs_hat - critic_obs)
->>>>>>> c3a391c (first_commit on ws1)
         observation_difference = torch.flatten(observation_difference,0,1).mean(dim=0)
         base_vel_diff = observation_difference[0:3].mean()
         angle_diff = observation_difference[3:6].mean()
@@ -1455,32 +1383,14 @@ class WorldModel_normal_org(nn.Module):
         if writer is not None and it > 0:
             writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
             writer.add_scalar("WorldModel/reconstruction_loss_out", reconstruction_loss_out.item(), it)
-<<<<<<< HEAD
-            writer.add_scalar("WorldModel/reward_loss", reward_loss.item(), it)
-            writer.add_scalar("WorldModel/termination_loss", termination_loss.item(), it)
-            # writer.add_scalar("WorldModel/dynamics_loss", dynamics_loss.item(), it)
-            writer.add_scalar("WorldModel/kl_loss", kl_loss.item(), it)
-            writer.add_scalar("WorldModel/real_kl_loss", real_kl_loss.item(), it)
-            # writer.add_scalar("WorldModel/mu_prior", mu_prior.item(), it)
-            # writer.add_scalar("WorldModel/var_prior", var_prior.item(), it)
-            # writer.add_scalar("WorldModel/mu_post", mu_post.item(), it)
-            # writer.add_scalar("WorldModel/var_post", var_post.item(), it)
-            # writer.add_scalar("WorldModel/representation_loss", representation_loss.item(), it)
-            # writer.add_scalar("WorldModel/representation_real_kl_div", representation_real_kl_div.item(), it)
-=======
             # writer.add_scalar("WorldModel/reward_loss", reward_loss.item(), it)
             # writer.add_scalar("WorldModel/termination_loss", termination_loss.item(), it)
             writer.add_scalar("WorldModel/kl_loss", kl_loss.item(), it)
             writer.add_scalar("WorldModel/real_kl_loss", real_kl_loss.item(), it)
->>>>>>> c3a391c (first_commit on ws1)
             writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
             writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
             writer.add_scalar("obs_diff/angle_diff", angle_diff.item(), it)
             writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
-<<<<<<< HEAD
-            # writer.add_scalar("obs_diff/command_diff", command_diff.item(), it)
-=======
->>>>>>> c3a391c (first_commit on ws1)
             writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
             writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
             # writer.add_scalar("obs_diff/contact_diff", contact_diff.item(), it)
@@ -1496,11 +1406,7 @@ class WorldModel_normal_org(nn.Module):
         # modify the obs to not include command and actions
         # which is obs[:, :, 9:12] and obs[:, :, 36:48]
         # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-<<<<<<< HEAD
-        obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
-=======
         # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
->>>>>>> c3a391c (first_commit on ws1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
             embedding = self.encoder(obs)
@@ -1511,10 +1417,6 @@ class WorldModel_normal_org(nn.Module):
             # decoding image
             obs_hat = self.image_decoder(flattened_sample)
 
-<<<<<<< HEAD
-            # transformer
-=======
->>>>>>> c3a391c (first_commit on ws1)
             temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
             dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
             mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
@@ -1523,23 +1425,6 @@ class WorldModel_normal_org(nn.Module):
 
             obs_hat_out = self.image_decoder(flattened_prior_sample)
             # decoding reward and termination with dist_feat
-<<<<<<< HEAD
-            reward_hat = self.reward_decoder(dist_feat)
-            termination_hat = self.termination_decoder(dist_feat)
-
-            # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs_decoder)
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], obs_decoder[:,1:,:])
-            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            reward_loss = self.mse_loss(reward_hat, reward)
-            termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
-            total_loss = reconstruction_loss + reconstruction_loss_out + reward_loss + termination_loss
-            # # dyn-rep loss
-            # dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
-            # representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-            # total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
-=======
             # reward_hat = self.reward_decoder(dist_feat)
             # termination_hat = self.termination_decoder(dist_feat)
 
@@ -1560,16 +1445,11 @@ class WorldModel_normal_org(nn.Module):
             # representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
             total_loss = reconstruction_loss + kl_loss + reconstruction_loss_out + reconstruction_loss_contact + reconstruction_loss_contact_out# + reward_loss + termination_loss #+ 0.5*dynamics_loss + 0.1*representation_loss
 
->>>>>>> c3a391c (first_commit on ws1)
 
         # gradient descent
         self.scaler.scale(total_loss).backward()
         self.scaler.unscale_(self.optimizer)  # for clip grad
-<<<<<<< HEAD
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5.0)
-=======
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
->>>>>>> c3a391c (first_commit on ws1)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
@@ -1577,23 +1457,16 @@ class WorldModel_normal_org(nn.Module):
         if writer is not None and it > 0:
             writer.add_scalar("tokenizer/reconstruction_loss", reconstruction_loss.item(), it)
             writer.add_scalar("tokenizer/reconstruction_loss_out", reconstruction_loss_out.item(), it)
-<<<<<<< HEAD
-            writer.add_scalar("tokenizer/reward_loss", reward_loss.item(), it)
-            writer.add_scalar("okenizer/termination_loss", termination_loss.item(), it)
-=======
             # writer.add_scalar("tokenizer/reward_loss", reward_loss.item(), it)
             # writer.add_scalar("tokenizer/termination_loss", termination_loss.item(), it)
             writer.add_scalar("tokenizer/kl_loss", kl_loss.item(), it)
             writer.add_scalar("tokenizer/real_kl_loss", real_kl_loss.item(), it)
->>>>>>> c3a391c (first_commit on ws1)
             writer.add_scalar("tokenizer/total_loss", total_loss.item(), it)
             # writer.add_scalar("tokenizer/mu_prior", mu_prior.item(), it)
             # writer.add_scalar("tokenizer/var_prior", var_prior.item(), it)
             # writer.add_scalar("tokenizer/mu_post", mu_post.item(), it)
             # writer.add_scalar("tokenizer/var_post", var_post.item(), it)
 
-<<<<<<< HEAD
-=======
 class WorldModel_GRU(nn.Module):
     def __init__(self, in_channels, gru_hidden_size, mlp_hidden_size, decoder_out_channels):
         """
@@ -1665,4 +1538,3 @@ class WorldModel_GRU(nn.Module):
             obs_hat = self.image_decoder(flattened_sample)
 
             # transformer
->>>>>>> c3a391c (first_commit on ws1)

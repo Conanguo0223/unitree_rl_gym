@@ -2,10 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-<<<<<<< HEAD
-=======
 import math
->>>>>>> c3a391c (first_commit on ws1)
 from einops import rearrange, repeat
 
 
