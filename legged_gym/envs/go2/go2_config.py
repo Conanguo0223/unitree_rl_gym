@@ -45,6 +45,29 @@ class GO2RoughCfg( LeggedRobotCfg ):
         class scales( LeggedRobotCfg.rewards.scales ):
             torques = -0.0002
             dof_pos_limits = -10.0
+            
+    class domain_rand(LeggedRobotCfg.domain_rand):
+        randomize_friction = True
+        friction_range = [0.5, 1.25]
+        randomize_restitution = True
+        restitutions_range = [0.0, 0.4]
+        randomize_base_mass = True
+        added_mass_range = [-1., 1.]
+        push_robots = True
+        push_interval_s = 15
+        max_push_vel_xy = 1.
+
+    class commands(LeggedRobotCfg.commands):
+        curriculum = False
+        max_curriculum = 1.
+        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        resampling_time = 10. # time before command are changed[s]
+        heading_command = True # if true: compute ang vel command from heading error
+        class ranges:
+            lin_vel_x = [-1.0, 1.0] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
+            lin_vel_y = [-1.0, 1.0]# [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
+            ang_vel_yaw = [-1.0, 1.0]  # [-1, 1] [0.0, 0.0]   # min max [rad/s]
+            heading = [-3.14, 3.14] # [-3.14, 3.14] [0.0, 0.0]
 
 class GO2RoughCfgPPO( LeggedRobotCfgPPO ):
     class algorithm( LeggedRobotCfgPPO.algorithm ):
@@ -52,6 +75,7 @@ class GO2RoughCfgPPO( LeggedRobotCfgPPO ):
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'rough_go2'
+        max_iterations = 5000
 ### ======= TWM =======
 class GO2RoughCfgTWM( LeggedRobotCfg ):
     class env(LeggedRobotCfg.env):
@@ -262,7 +286,7 @@ class GO2RoughCfgPPOTWM_val( LeggedRobotCfgPPO):
         twm_start_train_policy_steps = 0 # start training the policy using dynamics after this many steps
         twm_train_policy_steps = 2 # train the policy using dynamics per this many steps
         dreaming_batch_size = 2048 # batch size for dreaming 
-        batch_length = 16
+        batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
         train_tokenizer_times = 20
@@ -335,26 +359,33 @@ class GO2RoughCfgTWM_train( LeggedRobotCfg ):
         num_envs = 4096
         num_privileged_obs = 57
         episode_length_s = 100 # episode length in seconds
-    class domain_rand( LeggedRobotCfg.domain_rand ):
+    class domain_rand(LeggedRobotCfg.domain_rand):
         randomize_friction = True
-        friction_range = [2.0, 2.0] # friction in joint
+        friction_range = [0.5, 1.25]
+        randomize_restitution = True
+        restitutions_range = [0.0, 0.4]
         randomize_base_mass = True
-        added_mass_range = [2.0, 2.0]
-        push_robots = False
+        added_mass_range = [-1., 1.]
+        push_robots = True
         push_interval_s = 15
         max_push_vel_xy = 1.
+
+    class commands(LeggedRobotCfg.commands):
+        curriculum = False
+        max_curriculum = 1.
+        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        resampling_time = 10. # time before command are changed[s]
+        heading_command = True # if true: compute ang vel command from heading error
+        class ranges:
+            lin_vel_x = [-1.0, 1.0] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
+            lin_vel_y = [-1.0, 1.0]# [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
+            ang_vel_yaw = [-1.0, 1.0]  # [-1, 1] [0.0, 0.0]   # min max [rad/s]
+            heading = [-3.14, 3.14] # [-3.14, 3.14] [0.0, 0.0]
     
     class terrain(LeggedRobotCfg.terrain):
         static_friction = 1.0
         dynamic_friction = 1.0
         restitution = 0.
-
-    class commands(LeggedRobotCfg.commands):
-        class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [0.75, 0.75] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
-            lin_vel_y = [0.0, 0.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
-            ang_vel_yaw = [0.0, 0.0] # [-1, 1] [0.0, 0.0]   # min max [rad/s]
-            heading = [0.0, 0.0] # [-3.14, 3.14] [0.0, 0.0]
 
     class noise(LeggedRobotCfg.noise):
         add_noise = False
@@ -374,14 +405,14 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 64 
+        twm_hidden_dim = 128
         twm_num_layers = 2
         twm_num_heads = 8
         twm_train_steps = 1 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
         twm_start_train_policy_steps = 0 # start training the policy using dynamics after this many steps
         twm_train_policy_steps = 2 # train the policy using dynamics per this many steps
-        dreaming_batch_size = 4096 # batch size for dreaming 
+        dreaming_batch_size = 2048 # batch size for dreaming 
         batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
@@ -406,7 +437,7 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         experiment_name = 'rough_go2_TWM_train'
         max_iterations = 5000
 
-### ======= TWM training =======
+### ======= GRU TWM training =======
 class GO2RoughCfgGRU_train( LeggedRobotCfg ):
     class init_state( LeggedRobotCfg.init_state ):
         pos = [0.0, 0.0, 0.42] # x,y,z [m]
@@ -499,13 +530,12 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
         gru_train_steps = 1 # train the gru per this many steps
         gru_start_train_steps = 0 # start training the gru after this many steps
         gru_start_train_policy_steps = 10 # start training the policy using dynamics after this many steps
-        gru_train_policy_steps = 5 # train the policy using dynamics per this many steps
-        dreaming_batch_size = 1024 # batch size for dreaming 
+        dreaming_batch_size = 4096 # batch size for dreaming 
         batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
-        train_agent_steps = 5 # train the agent this many steps using dynamics
-        train_tokenizer_times = 10
-        train_dynamic_times = 10
+        train_agent_steps = 2 # train the agent this many steps using dynamics
+        train_tokenizer_times = 20
+        train_dynamic_times = 20
         use_context = False
         
         # class Agent():

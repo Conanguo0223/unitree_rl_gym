@@ -141,7 +141,7 @@ class VectorQuantizer(nn.Module):
         return quantized, loss, indices
 
 class DecoderBN(nn.Module):
-    def __init__(self, stoch_dim, last_channels, original_in_channels, stem_channels, feature_depth) -> None:
+    def __init__(self, stoch_dim, last_channels, original_in_channels, stem_channels, feature_depth, out_bool=False) -> None:
         super().__init__()
         self.type = "linear"
         # self.type = "conv"
@@ -737,7 +737,7 @@ class WorldModel_normal(nn.Module):
                  transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
         super().__init__()
         self.transformer_hidden_dim = transformer_hidden_dim
-        self.feature_depth = 1 #3 
+        self.feature_depth = 2 #1:64 #2:128 #3:256
         self.stoch_dim = 16
         self.stoch_flattened_dim = self.stoch_dim*self.stoch_dim
         self.use_amp = True
@@ -760,6 +760,11 @@ class WorldModel_normal(nn.Module):
             dropout=0.1
         )
         self.dist_head_vae = DistHeadVAE(
+            image_feat_dim=self.encoder.last_channels,
+            transformer_hidden_dim=transformer_hidden_dim,
+            stoch_dim=self.stoch_dim
+        )
+        self.dist_head_contacts = DistHead(
             image_feat_dim=self.encoder.last_channels,
             transformer_hidden_dim=transformer_hidden_dim,
             stoch_dim=self.stoch_dim
@@ -953,7 +958,9 @@ class WorldModel_normal(nn.Module):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
             embedding = self.encoder(obs)
+            # distribution for float values
             mu_post, var_post = self.dist_head_vae.forward_post_vae(embedding)
+            # distribution for discrete values
             flattened_sample = self.reparameterize(mu_post, var_post)
             # flattened_sample = self.flatten_sample(sample)
 

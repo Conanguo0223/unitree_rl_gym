@@ -121,7 +121,7 @@ class OnPolicy_WM_Runner_train:
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         if load_policy_model:
-            self.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM/May08_10-41-46_/model_5000.pt")
+            self.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2/baseline_policy/model_5000.pt")
             self.inference_policy = self.get_inference_policy(device=self.env.device)
             print("loaded pretrained policy")
         # bigger replay buffer for the world model
@@ -183,11 +183,7 @@ class OnPolicy_WM_Runner_train:
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         
         ep_infos = []
-        rewbuffer = deque(maxlen=100) # calculate mean reward 
-        lenbuffer = deque(maxlen=100) # calculate mean episode length
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current reward 
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current episode length
-        episodic_reward = 0
+        collect_steps = 1
         tot_iter = self.current_learning_iteration + num_learning_iterations
         
         """
@@ -201,71 +197,73 @@ class OnPolicy_WM_Runner_train:
         for it in range(self.current_learning_iteration, tot_iter):
             data_collected = 0
             start = time.time()
-            # 1. Collect num_steps_per_env steps of experience from the environment.
-            with torch.inference_mode():
-                obs_list = []
-                actions_list = []
-                privilege_obs_list = []
-                reward_list = []
-                dones_list = []
-                term_indexes = []
-                # collect data from the environment
-                for i in range(self.num_steps_per_env):
-                    # =============Sample Action=============
-                    actions = self.inference_policy(obs.detach())
-                    # =============Step the environment=============
-                    obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
-                    # critic_obs = privileged_obs if privileged_obs is not None else obs
-                    critic_obs = obs
-                    obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
-                    
-                    # save the experience to the replay buffer for world model training
-                    # there could be different types for saving the experience
-                    # aggregated, or not aggregated
-                    obs_list.append(obs)
-                    privilege_obs_list.append(privileged_obs)
-                    actions_list.append(actions)
-                    reward_list.append(rewards)
-                    dones_list.append(dones)
+            if it % collect_steps == 0:
+                # 1. Collect num_steps_per_env steps of experience from the environment.
+                with torch.inference_mode():
+                    obs_list = []
+                    actions_list = []
+                    privilege_obs_list = []
+                    reward_list = []
+                    dones_list = []
+                    term_indexes = []
+                    # collect data from the environment
+                    for i in range(self.num_steps_per_env):
+                        # =============Sample Action=============
+                        actions = self.inference_policy(obs.detach())
+                        # =============Step the environment=============
+                        obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
+                        # critic_obs = privileged_obs if privileged_obs is not None else obs
+                        critic_obs = obs
+                        obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
+                        
+                        # save the experience to the replay buffer for world model training
+                        # there could be different types for saving the experience
+                        # aggregated, or not aggregated
+                        obs_list.append(obs)
+                        privilege_obs_list.append(privileged_obs)
+                        actions_list.append(actions)
+                        reward_list.append(rewards)
+                        dones_list.append(dones)
 
-                obs_list = torch.stack(obs_list, dim=0)
-                privilege_obs_list = torch.stack(privilege_obs_list, dim=0)
-                actions_list = torch.stack(actions_list, dim=0)
-                reward_list = torch.stack(reward_list, dim=0)
-                dones_list = torch.stack(dones_list, dim=0)
+                    obs_list = torch.stack(obs_list, dim=0)
+                    privilege_obs_list = torch.stack(privilege_obs_list, dim=0)
+                    actions_list = torch.stack(actions_list, dim=0)
+                    reward_list = torch.stack(reward_list, dim=0)
+                    dones_list = torch.stack(dones_list, dim=0)
 
-                obs_list = rearrange(obs_list,"T N F -> N T F")
-                privilege_obs_list = rearrange(privilege_obs_list,"T N F -> N T F")
-                actions_list = rearrange(actions_list,"T N A -> N T A")
-                reward_list = rearrange(reward_list,"T N -> N T")
-                dones_list = rearrange(dones_list,"T N -> N T")
+                    obs_list = rearrange(obs_list,"T N F -> N T F")
+                    privilege_obs_list = rearrange(privilege_obs_list,"T N F -> N T F")
+                    actions_list = rearrange(actions_list,"T N A -> N T A")
+                    reward_list = rearrange(reward_list,"T N -> N T")
+                    dones_list = rearrange(dones_list,"T N -> N T")
 
-                # find the indices with termination, we want to exclude them
-                has_true = dones_list.any(dim=1)
-                indices = torch.nonzero(~has_true, as_tuple=True)[0]
+                    # find the indices with termination, we want to exclude them
+                    has_true = dones_list.any(dim=1)
+                    indices = torch.nonzero(~has_true, as_tuple=True)[0]
 
-                # filtered the data
-                obs_list = obs_list[indices]
-                privilege_obs_list = privilege_obs_list[indices]
-                actions_list = actions_list[indices]
-                reward_list = reward_list[indices]
-                dones_list = dones_list[indices]
+                    # filtered the data
+                    obs_list = obs_list[indices]
+                    privilege_obs_list = privilege_obs_list[indices]
+                    actions_list = actions_list[indices]
+                    reward_list = reward_list[indices]
+                    dones_list = dones_list[indices]
 
-                self.replay_buffer.append(obs_list, privilege_obs_list, actions_list, reward_list, dones_list)
+                    self.replay_buffer.append(obs_list, privilege_obs_list, actions_list, reward_list, dones_list)
 
-                stop = time.time()
-                collection_time = stop - start
-            # =============end data collection=============
-            data_collected = obs_list.shape[0]
-            print("data collected: ", data_collected)
+                    stop = time.time()
+                    collection_time = stop - start
+                # =============end data collection=============
+                data_collected = obs_list.shape[0]
+                print("data collected: ", data_collected)
+                print("replay buffer size: ", len(self.replay_buffer))
+            if self.replay_buffer.full:
+                collect_steps = 100
             start = stop
             # 3. Update world model
             if it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
                 # 3-1 train tokenizer
                 # modify the batch size
                 batch_size = self.dreaming_batch_size
-                if self.replay_buffer.current_index < self.dreaming_batch_size:
-                    batch_size = self.replay_buffer.current_index
                 for it_tok in range(self.train_tokenizer_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.batch_length)
                     # (batch, time, feature)

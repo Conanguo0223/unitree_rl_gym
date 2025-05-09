@@ -11,6 +11,14 @@ from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal
 import numpy as np
 import torch
 
+def pd_control(actions, q, target_dq, dq, default_dof):
+    """Calculates torques from position commands"""
+    action_scaled = 0.25*actions
+    action_scaled += default_dof
+    kp = 20.0
+    kd = 0.5
+    return (action_scaled - q) * kp + (target_dq - dq) * kd
+
 def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel_normal(
         in_channels=in_channels,
@@ -56,7 +64,7 @@ def play(args):
     
     # build and load world model
     worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_val/May08_16-23-52_/world_model_900.pt"))
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May08_23-41-30_/world_model_900.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -117,12 +125,13 @@ def play(args):
         for imag_step in range(imagine_horizon-1):
             # get the action taken at H + 1 + imag_step
             action_sample_current = action_sample[:,start_episode+batch_length+imag_step:start_episode+imag_step+batch_length+1,:]
-
+            torque = pd_control(action_sample_current, obs_hat[:,:,9:21], 0.0, obs_hat[:,:,21:33], env.default_dof_pos)
             # prepare full observation
             pred_obs_full = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
                               cmd_tensor,               # cmd_tensor
                               obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                              action_sample_current        # final_actions
+                            #   torque        # final_actions
+                            action_sample_current
                              ], dim=-1)
 
             #=============Step using the world model=============
