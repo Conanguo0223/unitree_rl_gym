@@ -6,7 +6,7 @@ from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange
 from torch.cuda.amp import autocast
 from torch.utils.tensorboard import SummaryWriter
-
+import math
 from .functions_losses import SymLogTwoHotLoss
 from .attention_blocks import get_subsequent_mask_with_batch_length, get_subsequent_mask
 from .transformer_model import StochasticTransformerKVCache
@@ -182,30 +182,38 @@ class DecoderBN(nn.Module):
             feat_width *= 2
             backbone.append(nn.BatchNorm1d(channels))
             backbone.append(nn.ReLU(inplace=True))
-        if self.type == "linear":
-            backbone.append(
-                nn.Linear(
-                    in_features=channels,
-                    out_features=original_in_channels,
-                    bias=False
-                )
-            )
-        if self.type == "conv":
-            backbone.append(
-                nn.ConvTranspose1d(
-                    in_channels=channels,
-                    out_channels=original_in_channels,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1
-                )
-            )
+        # if self.type == "linear":
+        #     backbone.append(
+        #         nn.Linear(
+        #             in_features=channels,
+        #             out_features=original_in_channels,
+        #             bias=False
+        #         )
+        #     )
+        # if self.type == "conv":
+        #     backbone.append(
+        #         nn.ConvTranspose1d(
+        #             in_channels=channels,
+        #             out_channels=original_in_channels,
+        #             kernel_size=4,
+        #             stride=2,
+        #             padding=1
+        #         )
+        #     )
+        bool_channels = 12
+        self.float_head = nn.Linear(channels, original_in_channels-bool_channels)
+        self.bool_head = nn.Linear(channels, bool_channels)
         self.backbone = nn.Sequential(*backbone)
 
     def forward(self, sample):
         batch_size = sample.shape[0] # B L (K C)
-        obs_hat = self.backbone(sample)
-        obs_hat = rearrange(obs_hat, "(B L) F -> B L F", B=batch_size)
+        sample = self.backbone(sample)
+        float_out = self.float_head(sample)
+        bool_logits = self.bool_head(sample)
+        bool_out = torch.sigmoid(bool_logits)
+        float_out = rearrange(float_out, "(B L) F -> B L F", B=batch_size)
+        bool_out = rearrange(bool_out, "(B L) F -> B L F", B=batch_size)
+        obs_hat = torch.cat([float_out, bool_out], dim=-1)
         return obs_hat
 
 
@@ -737,7 +745,8 @@ class WorldModel_normal(nn.Module):
                  transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
         super().__init__()
         self.transformer_hidden_dim = transformer_hidden_dim
-        self.feature_depth = 2 #1:64 #2:128 #3:256
+        self.decoder_out_channels = decoder_out_channels
+        self.feature_depth = int(math.log2(transformer_hidden_dim) - 5.0) #1:64 #2:128 #3:256
         self.stoch_dim = 16
         self.stoch_flattened_dim = self.stoch_dim*self.stoch_dim
         self.use_amp = True
@@ -794,9 +803,7 @@ class WorldModel_normal(nn.Module):
         self.kl_div_loss = KLDivLoss(free_bits = 1.0)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4,weight_decay=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
-        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        #                                     self.optimizer, max_lr=1e-3, total_steps=total_training_steps
-        #                                 )
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=800, gamma=0.1)
     def encode_obs(self, obs):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             embedding = self.encoder(obs)
@@ -857,16 +864,16 @@ class WorldModel_normal(nn.Module):
             # these three parameters are used to predict the future, so it will have one extra
             latent_size = (imagine_batch_size, imagine_batch_length+1, self.stoch_flattened_dim)
             hidden_size = (imagine_batch_size, imagine_batch_length+1, self.transformer_hidden_dim)
-            obs_hat_size = (imagine_batch_size, imagine_batch_length+1, self.in_channels) # set obs dimension
+            obs_hat_size = (imagine_batch_size, imagine_batch_length+1, self.decoder_out_channels) # set obs dimension
             # other parametes are saying information about the current time step
             action_size = (imagine_batch_size, imagine_batch_length, 12) # set action dimension
-            scalar_size = (imagine_batch_size, imagine_batch_length)
+            # scalar_size = (imagine_batch_size, imagine_batch_length)
             self.obs_hat_buffer = torch.zeros(obs_hat_size, dtype=dtype, device="cuda")
             self.latent_buffer = torch.zeros(latent_size, dtype=dtype, device="cuda")
             self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device="cuda")
             self.action_buffer = torch.zeros(action_size, dtype=dtype, device="cuda")
-            self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
-            self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+            # self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+            # self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
 
     def imagine_data(self, agent: ActorCriticAgent, sample_obs, sample_action,
                      imagine_batch_size, imagine_batch_length, log_video, logger):
@@ -882,11 +889,13 @@ class WorldModel_normal(nn.Module):
                 sample_action[:, i:i+1],
                 log_video=log_video
             )
+        self.obs_hat_buffer[:, 0:1] = last_obs_hat
         self.latent_buffer[:, 0:1] = last_latent
         self.hidden_buffer[:, 0:1] = last_dist_feat
 
         # imagine
         for i in range(imagine_batch_length):
+            obs_sample = self.obs_hat_buffer[:, i:i+1]
             action = agent.sample(torch.cat([self.latent_buffer[:, i:i+1], self.hidden_buffer[:, i:i+1]], dim=-1))
             self.action_buffer[:, i:i+1] = action
 
@@ -972,9 +981,9 @@ class WorldModel_normal(nn.Module):
             temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
             dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
             mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
-            # flattened_prior_sample = self.reparameterize(mu_prior, var_prior)
+            flattened_prior_sample = self.reparameterize(mu_prior, var_prior)
 
-            # obs_hat_out = self.image_decoder(flattened_prior_sample)
+            obs_hat_out = self.image_decoder(flattened_prior_sample)
 
             # decoding reward and termination with dist_feat
             # reward_hat = self.reward_decoder(dist_feat)
@@ -986,9 +995,11 @@ class WorldModel_normal(nn.Module):
             reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
 
             # reconstruction loss on the output
-            # reconstruction_loss_contact_out = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
-            # reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:45], critic_obs[:,1:,:45])
+            reconstruction_loss_contact_out = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
+            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:45], critic_obs[:,1:,:45])
 
+            reconstruction_loss = reconstruction_loss + reconstruction_loss_contact
+            reconstruction_loss_out = reconstruction_loss_out + reconstruction_loss_contact_out
             # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
             # reward_loss = self.mse_loss(torch.unsqueeze(reward_hat,-1), torch.unsqueeze(reward,-1))
             # termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
@@ -996,7 +1007,7 @@ class WorldModel_normal(nn.Module):
             dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(mu_post[:,1:,:].detach(), var_post[:,1:,:].detach(), mu_prior[:,:-1,:], var_prior[:,:-1,:])
             representation_loss, representation_real_kl_div = self.kl_div_loss(mu_post[:,1:,:], var_post[:,1:,:], mu_prior[:,:-1,:].detach(), var_prior[:,:-1,:].detach())
 
-            total_loss = reconstruction_loss + reconstruction_loss_contact + 0.5*dynamics_loss + 0.1*representation_loss
+            total_loss = reconstruction_loss + reconstruction_loss_out + 0.8*dynamics_loss + 0.8*representation_loss
 
         # gradient descent
         self.scaler.scale(total_loss).backward()
@@ -1015,6 +1026,7 @@ class WorldModel_normal(nn.Module):
         dof_vel_diff = observation_difference[21:33].mean()
 
         if writer is not None and it > 0:
+            self.scheduler.step()
             writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
             writer.add_scalar("WorldModel/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
             writer.add_scalar("WorldModel/dynamics_loss", dynamics_loss.item(), it)
@@ -1038,10 +1050,6 @@ class WorldModel_normal(nn.Module):
         batch_size, batch_length = obs.shape[:2]
         # scale reward to be larger
 
-        # modify the obs to not include command and actions
-        # which is obs[:, :, 9:12] and obs[:, :, 36:48]
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
             embedding = self.encoder(obs)
@@ -1052,27 +1060,11 @@ class WorldModel_normal(nn.Module):
             # decoding image
             obs_hat = self.image_decoder(flattened_sample)
 
-            # transformer
-            # TODO: change mask to allowing the first batch_length to all be true
-            # temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            # dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
-            # mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
-            # flattened_prior_sample = self.reparameterize(mu_prior, var_prior)
-
-            # obs_hat_out = self.image_decoder(flattened_prior_sample)
-
-            # decoding reward and termination with dist_feat
-            # reward_hat = self.reward_decoder(dist_feat)
-            # termination_hat = self.termination_decoder(dist_feat)
-
             # env loss
             # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
             reconstruction_loss = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
             reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
 
-            # reconstruction loss on the output
-            # reconstruction_loss_contact_out = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
-            # reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:45], critic_obs[:,1:,:45])
             total_loss = reconstruction_loss + reconstruction_loss_contact
 
         # gradient descent
@@ -1084,17 +1076,10 @@ class WorldModel_normal(nn.Module):
         self.optimizer.zero_grad(set_to_none=True)
 
         if writer is not None and it > 0:
+            self.scheduler.step()
             writer.add_scalar("tokenizer/reconstruction_loss", reconstruction_loss.item(), it)
-            # writer.add_scalar("tokenizer/reconstruction_loss_out", reconstruction_loss_out.item(), it)
-            # writer.add_scalar("tokenizer/reward_loss", reward_loss.item(), it)
-            # writer.add_scalar("tokenizer/termination_loss", termination_loss.item(), it)
             writer.add_scalar("tokenizer/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
-            # writer.add_scalar("tokenizer/real_kl_loss", real_kl_loss.item(), it)
             writer.add_scalar("tokenizer/total_loss", total_loss.item(), it)
-            # writer.add_scalar("tokenizer/mu_prior", mu_prior.item(), it)
-            # writer.add_scalar("tokenizer/var_prior", var_prior.item(), it)
-            # writer.add_scalar("tokenizer/mu_post", mu_post.item(), it)
-            # writer.add_scalar("tokenizer/var_post", var_post.item(), it)
 
 class WorldModel_GRU(nn.Module):
     def __init__(self, obs_dim, decoder_out_channels, gru_hidden_size=256, mlp_hidden_size=128):

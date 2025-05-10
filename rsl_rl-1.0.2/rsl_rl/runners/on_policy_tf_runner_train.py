@@ -148,6 +148,7 @@ class OnPolicy_WM_Runner_train:
         self.train_tw_policy_steps = self.twm_cfg["twm_train_policy_steps"]
         self.dreaming_batch_size = self.twm_cfg["dreaming_batch_size"]
         self.batch_length = self.twm_cfg["batch_length"]
+        self.twm_max_len = self.twm_cfg["twm_max_len"]
         self.demonstration_batch_size = self.twm_cfg["demonstration_batch_size"]
         self.train_agent_steps = self.twm_cfg["train_agent_steps"]
         self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
@@ -265,7 +266,7 @@ class OnPolicy_WM_Runner_train:
                 # modify the batch size
                 batch_size = self.dreaming_batch_size
                 for it_tok in range(self.train_tokenizer_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.batch_length)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
                     # (batch, time, feature)
                     if it_tok < self.train_tokenizer_times-1:
                         self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
@@ -275,7 +276,7 @@ class OnPolicy_WM_Runner_train:
                 
                 # 3-2 train dynamics
                 for it_wm in range(self.train_dynamics_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.batch_length)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
                     if it_wm < self.train_dynamics_times-1:
                         self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:

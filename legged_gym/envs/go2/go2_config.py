@@ -241,9 +241,9 @@ class GO2RoughCfgTWM_val( LeggedRobotCfg ):
         num_privileged_obs = 57
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True
-        friction_range = [2.0, 2.0] # friction in joint
+        friction_range = [1.0, 1.0] # friction in joint
         randomize_base_mass = True
-        added_mass_range = [2.0, 2.0]
+        added_mass_range = [0.0, 0.0]
         push_robots = False
         push_interval_s = 15
         max_push_vel_xy = 1.
@@ -371,11 +371,6 @@ class GO2RoughCfgTWM_train( LeggedRobotCfg ):
         max_push_vel_xy = 1.
 
     class commands(LeggedRobotCfg.commands):
-        curriculum = False
-        max_curriculum = 1.
-        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
-        resampling_time = 10. # time before command are changed[s]
-        heading_command = True # if true: compute ang vel command from heading error
         class ranges:
             lin_vel_x = [-1.0, 1.0] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
             lin_vel_y = [-1.0, 1.0]# [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
@@ -393,7 +388,7 @@ class GO2RoughCfgTWM_train( LeggedRobotCfg ):
 
 class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
     """ Configuration for the GO2 environment with TWM algorithm """
-    seed = 1
+    seed = -1
     class algorithm( LeggedRobotCfgPPO.algorithm ):
         entropy_coef = 0.01
         desired_kl = 0.005
@@ -405,7 +400,7 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 128
+        twm_hidden_dim = 32
         twm_num_layers = 2
         twm_num_heads = 8
         twm_train_steps = 1 # train the transformer per this many steps
@@ -416,8 +411,8 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
-        train_tokenizer_times = 20
-        train_dynamic_times = 20
+        train_tokenizer_times = 10
+        train_dynamic_times = 10
         use_context = False
         
         # class Agent():
@@ -428,12 +423,12 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         #     entropyCoef = 3E-4
         #     use_context = False
     class buffer():
-        max_len = 10000
+        max_len = 100000
         BufferWarmUp = 4096
         ReplayBufferOnGPU = True
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        num_steps_per_env = 400 # per iteration
+        num_steps_per_env = 100 # per iteration
         experiment_name = 'rough_go2_TWM_train'
         max_iterations = 5000
 

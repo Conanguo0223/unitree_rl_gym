@@ -56,9 +56,9 @@ class StochasticTransformerKVCache(nn.Module):
             nn.Linear(feat_dim, feat_dim, bias=False),
             nn.LayerNorm(feat_dim)
         )
-        # self.position_encoding = PositionalEncoding1D(max_length=max_length, embed_dim=feat_dim)
+        self.position_encoding = PositionalEncoding1D(max_length=max_length, embed_dim=feat_dim)
         # self.position_encoding = PositionalEncoding1D_sin(channels=feat_dim)
-        self.position_encoding = SinusoidalPositionalEncoding(embed_dim=feat_dim, max_length=max_length)
+        # self.position_encoding = SinusoidalPositionalEncoding(embed_dim=feat_dim, max_length=max_length)
         self.layer_stack = nn.ModuleList([
             AttentionBlockKVCache(feat_dim=feat_dim, hidden_dim=feat_dim*2, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)
         ])
