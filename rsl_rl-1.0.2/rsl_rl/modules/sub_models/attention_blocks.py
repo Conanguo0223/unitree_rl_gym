@@ -11,12 +11,17 @@ def get_subsequent_mask(seq):
     batch_size, batch_length = seq.shape[:2]
     subsequent_mask = (1 - torch.triu(
         torch.ones((1, batch_length, batch_length), device=seq.device), diagonal=1)).bool()
-    return subsequent_mask
+    hybrid_mask = subsequent_mask
+    hybrid_mask[:,:32,:32] = True
+    return hybrid_mask
 
 
 def get_subsequent_mask_with_batch_length(batch_length, device):
     ''' For masking out the subsequent info. '''
     subsequent_mask = (1 - torch.triu(torch.ones((1, batch_length, batch_length), device=device), diagonal=1)).bool()
+    # no_mask = torch.ones((1, batch_length, batch_length), device=device).bool()
+    hybrid_mask = subsequent_mask
+    hybrid_mask[:,:32,:32] = True
     return subsequent_mask
 
 

@@ -101,6 +101,7 @@ class OnPolicy_WM_Runner_train:
         else:
             self.num_critic_obs = self.env.num_obs
         self.num_critic_obs = self.env.num_obs
+        # self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
         self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
@@ -251,40 +252,44 @@ class OnPolicy_WM_Runner_train:
 
                     self.replay_buffer.append(obs_list, privilege_obs_list, actions_list, reward_list, dones_list)
 
-                    stop = time.time()
-                    collection_time = stop - start
+                    
                 # =============end data collection=============
                 data_collected = obs_list.shape[0]
-                print("data collected: ", data_collected)
-                print("replay buffer size: ", len(self.replay_buffer))
+            stop = time.time()
+            collection_time = stop - start
+
             if self.replay_buffer.full:
-                collect_steps = 100
+                collect_steps = 500
             start = stop
             # 3. Update world model
             if it%self.train_dynamics_steps == 0 and it > self.start_train_dynamics_steps:
                 # 3-1 train tokenizer
                 # modify the batch size
                 batch_size = self.dreaming_batch_size
-                for it_tok in range(self.train_tokenizer_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
-                    # (batch, time, feature)
-                    if it_tok < self.train_tokenizer_times-1:
-                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
-                    else:
-                        # only log the final one
-                        self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+                # for it_tok in range(self.train_tokenizer_times):
+                #     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
+                #     # (batch, time, feature)
+                #     if it_tok < self.train_tokenizer_times-1:
+                #         self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
+                #     else:
+                #         # only log the final one
+                #         self.worldmodel.update_tokenizer(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
                 
                 # 3-2 train dynamics
                 for it_wm in range(self.train_dynamics_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
                     if it_wm < self.train_dynamics_times-1:
-                        self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
+                        self.worldmodel.update_autoregressive(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:
                         # only log the final one
-                        current_obs_loss = self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer, return_loss=True)
+                        current_obs_loss = self.worldmodel.update_autoregressive(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
             stop = time.time()
             learn_WM_time = stop - start
             # =============end updating world model=============            
+            print("data collected: ", data_collected)
+            print("replay buffer size: ", len(self.replay_buffer))
+            print("collection time: ", collection_time)
+            print("learn world model time: ", learn_WM_time)
 
             if it % self.save_interval == 0:    
                 torch.save(self.worldmodel.state_dict(), os.path.join(self.log_dir, 'world_model_{}.pt'.format(it)))

@@ -255,7 +255,7 @@ class GO2RoughCfgTWM_val( LeggedRobotCfg ):
 
     class commands(LeggedRobotCfg.commands):
         class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [0.75, 0.75] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
+            lin_vel_x = [0.5, 0.5] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
             lin_vel_y = [0.0, 0.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
             ang_vel_yaw = [0.0, 0.0] # [-1, 1] [0.0, 0.0]   # min max [rad/s]
             heading = [0.0, 0.0] # [-3.14, 3.14] [0.0, 0.0]
@@ -278,8 +278,8 @@ class GO2RoughCfgPPOTWM_val( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 64 
-        twm_num_layers = 2
+        twm_hidden_dim = 64
+        twm_num_layers = 4
         twm_num_heads = 8
         twm_train_steps = 2 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
@@ -361,21 +361,21 @@ class GO2RoughCfgTWM_train( LeggedRobotCfg ):
         episode_length_s = 100 # episode length in seconds
     class domain_rand(LeggedRobotCfg.domain_rand):
         randomize_friction = True
-        friction_range = [0.5, 1.25]
+        friction_range = [0.5,0.5]
         randomize_restitution = True
-        restitutions_range = [0.0, 0.4]
+        restitutions_range = [0.1, 0.1]
         randomize_base_mass = True
-        added_mass_range = [-1., 1.]
-        push_robots = True
+        added_mass_range = [0.5, 0.5]
+        push_robots = False
         push_interval_s = 15
-        max_push_vel_xy = 1.
+        max_push_vel_xy = 0.5
 
     class commands(LeggedRobotCfg.commands):
         class ranges:
-            lin_vel_x = [-1.0, 1.0] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
-            lin_vel_y = [-1.0, 1.0]# [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
-            ang_vel_yaw = [-1.0, 1.0]  # [-1, 1] [0.0, 0.0]   # min max [rad/s]
-            heading = [-3.14, 3.14] # [-3.14, 3.14] [0.0, 0.0]
+            lin_vel_x = [-0.5, 0.5] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
+            lin_vel_y = [-0.5, 0.5] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
+            ang_vel_yaw = [-0.5, 0.5]   # [-1, 1] [0.0, 0.0]   # min max [rad/s]
+            heading = [-1.57, 1.57] # [-3.14, 3.14] [0.0, 0.0]
     
     class terrain(LeggedRobotCfg.terrain):
         static_friction = 1.0
@@ -400,8 +400,8 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 32
-        twm_num_layers = 2
+        twm_hidden_dim = 64
+        twm_num_layers = 8
         twm_num_heads = 8
         twm_train_steps = 1 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
@@ -411,7 +411,7 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
-        train_tokenizer_times = 10
+        train_tokenizer_times = 1
         train_dynamic_times = 10
         use_context = False
         

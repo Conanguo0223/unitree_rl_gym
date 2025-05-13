@@ -29,10 +29,10 @@ def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
         transformer_num_layers = twm_cfg.twm_num_layers,
         transformer_num_heads = twm_cfg.twm_num_heads
     ).cuda()
-def build_world_model(in_channels, action_dim, twm_cfg):
+def build_world_model(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel(
         in_channels=in_channels,
-        decoder_out_channels= in_channels - 15,
+        decoder_out_channels= privileged_dim,
         action_dim=action_dim,
         transformer_max_length = twm_cfg.twm_max_len,
         transformer_hidden_dim = twm_cfg.twm_hidden_dim,
@@ -64,7 +64,7 @@ def play(args):
     
     # build and load world model
     worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May09_18-42-43_/world_model_4999.pt"))
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May13_01-55-42_/world_model_4999.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -108,6 +108,7 @@ def play(args):
     with torch.inference_mode():
         worldmodel.eval()
         # get the cmd_tensor to retrieve the full observation        
+        print("command:",env.commands)
         cmd_tensor = env.commands[:,:3].squeeze().cuda() * torch.tensor([2.0,2.0,0.25],device="cuda:0")
         cmd_tensor = cmd_tensor.repeat(dreaming_batch_size,1,1)
         steps = imagine_horizon// dreaming_batch_length

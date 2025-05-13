@@ -29,10 +29,10 @@ def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
         transformer_num_layers = twm_cfg.twm_num_layers,
         transformer_num_heads = twm_cfg.twm_num_heads
     ).cuda()
-def build_world_model(in_channels, action_dim, twm_cfg):
+def build_world_model(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel(
         in_channels=in_channels,
-        decoder_out_channels= in_channels - 15,
+        decoder_out_channels= privileged_dim,
         action_dim=action_dim,
         transformer_max_length = twm_cfg.twm_max_len,
         transformer_hidden_dim = twm_cfg.twm_hidden_dim,
@@ -64,7 +64,7 @@ def play(args):
     
     # build and load world model
     worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May09_18-15-43_/world_model_300.pt"))
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May12_00-01-00_/world_model_3600.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -118,9 +118,9 @@ def play(args):
         # obs_sample_for_compare = torch.cat([obs_sample[:, :start_episode+batch_length, :9], obs_sample[:, :start_episode+batch_length, 12:36]], dim=-1)
         obs_sample_for_compare = torch.cat((privilege_obs_sample[:, :start_episode+batch_length], obs_hat),dim=1)
         # prepare the rewards for compare
-        rewards_for_compare = torch.cat([reward_sample[:, :start_episode+batch_length].unsqueeze(-1), reward_hat], dim=1)
+        # rewards_for_compare = torch.cat([reward_sample[:, :start_episode+batch_length].unsqueeze(-1), reward_hat], dim=1)
         # prepare the terminations for compare
-        terminations_for_compare = torch.cat([dones_sample[:, :start_episode+batch_length].unsqueeze(-1), term_hat], dim=1)
+        # terminations_for_compare = torch.cat([dones_sample[:, :start_episode+batch_length].unsqueeze(-1), term_hat], dim=1)
 
         for imag_step in range(imagine_horizon-1):
             # get the action taken at H + 1 + imag_step
@@ -139,19 +139,19 @@ def play(args):
 
             obs_hat = obs_hat.to(env.device, dtype=torch.float)
             obs_sample_for_compare = torch.cat((obs_sample_for_compare, obs_hat),dim=1)
-            reward_sample_img, termination_sample_img = reward_sample_img.to(env.device,dtype=torch.float).unsqueeze(-1), termination_sample_img.to(env.device,dtype=torch.bool).unsqueeze(-1)
-            rewards_for_compare = torch.cat((rewards_for_compare, reward_sample_img),dim=1)
-            terminations_for_compare = torch.cat((terminations_for_compare, termination_sample_img),dim=1)
+            # reward_sample_img, termination_sample_img = reward_sample_img.to(env.device,dtype=torch.float).unsqueeze(-1), termination_sample_img.to(env.device,dtype=torch.bool).unsqueeze(-1)
+            # rewards_for_compare = torch.cat((rewards_for_compare, reward_sample_img),dim=1)
+            # terminations_for_compare = torch.cat((terminations_for_compare, termination_sample_img),dim=1)
             
     
     
     print("obs_sample_for_compare shape: ", obs_sample_for_compare.shape)
     np.save("obs_sample_np", privilege_obs_sample.squeeze().cpu().numpy())
     np.save("obs_hat_np", obs_sample_for_compare.squeeze().cpu().numpy())
-    np.save("rewards", reward_sample.cpu().numpy())
-    np.save("rewards_hat", rewards_for_compare.cpu().numpy())
-    np.save("terminations", dones_sample.cpu().numpy())
-    np.save("terminations_hat", terminations_for_compare.cpu().numpy())
+    # np.save("rewards", reward_sample.cpu().numpy())
+    # np.save("rewards_hat", rewards_for_compare.cpu().numpy())
+    # np.save("terminations", dones_sample.cpu().numpy())
+    # np.save("terminations_hat", terminations_for_compare.cpu().numpy())
     # x = np.arange(len(obs_sample_np[:,0]))
     # plt.plot(x, obs_sample_np[:,0:3], label='obs_sample')
     # x = np.arange(len(obs_hat_np[:,0]))
