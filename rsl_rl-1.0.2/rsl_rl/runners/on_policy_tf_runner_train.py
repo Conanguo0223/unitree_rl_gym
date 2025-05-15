@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal
+from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal, WorldModel_normal_small
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq, ReplayBuffer_seq_new
@@ -58,6 +58,17 @@ def build_world_model(in_channels, action_dim, twm_cfg, privileged_dim):
 
 def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel_normal(
+        in_channels=in_channels,
+        decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
+        action_dim=action_dim,
+        transformer_max_length = twm_cfg["twm_max_len"],
+        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
+        transformer_num_layers = twm_cfg["twm_num_layers"],
+        transformer_num_heads = twm_cfg["twm_num_heads"]
+    ).cuda()
+
+def build_world_model_normal_small(in_channels, action_dim, twm_cfg,privileged_dim):
+    return WorldModel_normal_small(
         in_channels=in_channels,
         decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
         action_dim=action_dim,
@@ -102,7 +113,8 @@ class OnPolicy_WM_Runner_train:
             self.num_critic_obs = self.env.num_obs
         self.num_critic_obs = self.env.num_obs
         # self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
-        self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
+        # self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
+        self.worldmodel = build_world_model_normal_small(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -280,9 +292,11 @@ class OnPolicy_WM_Runner_train:
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
                     if it_wm < self.train_dynamics_times-1:
                         self.worldmodel.update_autoregressive(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
+                        # self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                     else:
                         # only log the final one
                         current_obs_loss = self.worldmodel.update_autoregressive(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
+                        # self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, it, writer=self.writer)
             stop = time.time()
             learn_WM_time = stop - start
             # =============end updating world model=============            

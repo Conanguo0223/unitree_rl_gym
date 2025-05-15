@@ -400,9 +400,9 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 64
-        twm_num_layers = 8
-        twm_num_heads = 8
+        twm_hidden_dim = 128
+        twm_num_layers = 4
+        twm_num_heads = 1
         twm_train_steps = 1 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
         twm_start_train_policy_steps = 0 # start training the policy using dynamics after this many steps
@@ -497,11 +497,11 @@ class GO2RoughCfgGRU_train( LeggedRobotCfg ):
         restitution = 0.
 
     class commands(LeggedRobotCfg.commands):
-        class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [0.75, 0.75] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
-            lin_vel_y = [0.0, 0.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
-            ang_vel_yaw = [0.0, 0.0] # [-1, 1] [0.0, 0.0]   # min max [rad/s]
-            heading = [0.0, 0.0] # [-3.14, 3.14] [0.0, 0.0]
+        class ranges:
+            lin_vel_x = [-0.5, 0.5] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
+            lin_vel_y = [-0.5, 0.5] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
+            ang_vel_yaw = [-0.5, 0.5]   # [-1, 1] [0.0, 0.0]   # min max [rad/s]
+            heading = [-1.57, 1.57] # [-3.14, 3.14] [0.0, 0.0]
 
     class noise(LeggedRobotCfg.noise):
         add_noise = False
@@ -526,11 +526,11 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
         gru_start_train_steps = 0 # start training the gru after this many steps
         gru_start_train_policy_steps = 10 # start training the policy using dynamics after this many steps
         dreaming_batch_size = 4096 # batch size for dreaming 
-        batch_length = 32
+        batch_length = 40
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
-        train_tokenizer_times = 20
-        train_dynamic_times = 20
+        train_tokenizer_times = 0
+        train_dynamic_times = 10
         use_context = False
         
         # class Agent():

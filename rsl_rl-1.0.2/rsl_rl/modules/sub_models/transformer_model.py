@@ -127,3 +127,89 @@ class StochasticTransformerKVCache(nn.Module):
             feats, attn = layer(feats, feats, feats, mask)
         
         return feats
+    
+
+class StochasticTransformerKVCache_small(nn.Module):
+    def __init__(self, input_dim, feat_dim, num_layers, num_heads, max_length, dropout):
+        super().__init__()
+        
+        feat_dim = input_dim
+        self.feat_dim = feat_dim
+        # mix image_embedding and action
+        # self.stem = nn.Sequential(
+        #     # nn.Linear(stoch_dim+action_dim, feat_dim, bias=False),
+        #     # nn.Linear(input_dim, feat_dim, bias=False),
+        #     nn.LayerNorm(feat_dim),
+        #     # nn.ReLU()
+        # )
+        self.position_encoding = PositionalEncoding1D(max_length=max_length, embed_dim=feat_dim)
+        # self.position_encoding = PositionalEncoding1D_sin(channels=feat_dim)
+        # self.position_encoding = SinusoidalPositionalEncoding(embed_dim=feat_dim, max_length=max_length)
+        self.layer_stack = nn.ModuleList([
+            AttentionBlockKVCache(feat_dim=feat_dim, hidden_dim=256, num_heads=num_heads, dropout=dropout) for _ in range(num_layers)
+        ])
+        self.layer_norm = nn.LayerNorm(feat_dim, eps=1e-6)  # TODO: check if this is necessary
+
+    def forward(self, samples, mask):
+        '''
+        Normal forward pass
+        '''
+        # action is not one hot
+        # action = F.one_hot(action.long(), self.action_dim).float() 
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        # feats = self.stem(samples)
+        feats = self.position_encoding(samples)
+        feats = self.layer_norm(feats)
+
+        for layer in self.layer_stack:
+            feats, attn = layer(feats, feats, feats, mask)
+
+        return feats
+
+    def reset_kv_cache_list(self, batch_size, dtype):
+        '''
+        Reset self.kv_cache_list
+        '''
+        self.kv_cache_list = []
+        for layer in self.layer_stack:
+            self.kv_cache_list.append(torch.zeros(size=(batch_size, 0, self.feat_dim), dtype=dtype, device="cuda"))
+
+    def forward_with_kv_cache(self, samples):
+        '''
+        Forward pass with kv_cache, cache stored in self.kv_cache_list
+        '''
+        assert samples.shape[1] == 1
+        if self.kv_cache_list[0].shape[1] == self.position_encoding.max_length:
+            # exceed max length, shift the cache
+            for i, _ in enumerate(self.layer_stack):
+                self.kv_cache_list[i] = self.kv_cache_list[i][:, 1:, :]
+        mask = get_vector_mask(self.kv_cache_list[0].shape[1]+1, samples.device)
+
+        # action = F.one_hot(action.long(), self.action_dim).float()
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        # feats = self.stem(samples)
+        feats = self.position_encoding.forward_with_position(samples, position=self.kv_cache_list[0].shape[1])
+        feats = self.layer_norm(feats)
+
+        for idx, layer in enumerate(self.layer_stack):
+            self.kv_cache_list[idx] = torch.cat([self.kv_cache_list[idx], feats], dim=1)
+            feats, attn = layer(feats, self.kv_cache_list[idx], self.kv_cache_list[idx], mask)
+
+        return feats
+
+    def forward_context(self, samples, mask):
+        '''
+        Normal forward pass that returns the kv_cache of the context
+        '''
+        # action is not one hot
+        # action = F.one_hot(action.long(), self.action_dim).float() 
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        # feats = self.stem(samples)
+        feats = self.position_encoding(samples)
+        feats = self.layer_norm(feats)
+
+        for idx, layer in enumerate(self.layer_stack):
+            self.kv_cache_list[idx] = torch.cat([self.kv_cache_list[idx], feats], dim=1)
+            feats, attn = layer(feats, feats, feats, mask)
+        
+        return feats
