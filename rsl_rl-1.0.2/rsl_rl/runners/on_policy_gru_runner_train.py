@@ -88,7 +88,7 @@ class OnPolicy_GRU_Runner_train:
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
         self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
         if load_policy_model:
-            self.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM/May08_10-41-46_/model_5000.pt")
+            self.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2/baseline_policy/model_5000.pt")
             self.inference_policy = self.get_inference_policy(device=self.env.device)
             print("loaded pretrained policy")
         # bigger replay buffer for the world model
@@ -150,11 +150,6 @@ class OnPolicy_GRU_Runner_train:
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         
         ep_infos = []
-        rewbuffer = deque(maxlen=100) # calculate mean reward 
-        lenbuffer = deque(maxlen=100) # calculate mean episode length
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current reward 
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device) # accumulate current episode length
-        episodic_reward = 0
         collect_steps = 1
         tot_iter = self.current_learning_iteration + num_learning_iterations
         
@@ -237,8 +232,8 @@ class OnPolicy_GRU_Runner_train:
                 # 3-1 train tokenizer
                 # modify the batch size
                 batch_size = self.dreaming_batch_size
-                if self.replay_buffer.current_index < self.dreaming_batch_size:
-                    batch_size = self.replay_buffer.current_index
+                # if self.replay_buffer.current_index < self.dreaming_batch_size:
+                #     batch_size = self.replay_buffer.current_index
                 for it_tok in range(self.train_dynamics_times):
                     obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.batch_length)
                     # (batch, time, feature)

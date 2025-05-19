@@ -1259,7 +1259,7 @@ class WorldModel_GRU(nn.Module):
         # Return the reparameterized sample
         return q.rsample()
     
-    def forward(self, obs_sequence, action_sequence,prediction_horizon):
+    def forward(self, obs_sequence, h = None):
         """
         Forward pass for the GRU-based world model.
 
@@ -1275,27 +1275,34 @@ class WorldModel_GRU(nn.Module):
             hidden_state (Tensor): Final hidden state of the GRU.
         """
         # Encode input features
-        out, h = self.gru(obs_sequence)
+        if h is None:
+            out, h = self.gru(obs_sequence)
+        else:
+            out, h = self.gru(obs_sequence, h)
+        obs_hat = self.obs_head(out) # obs_hat: (batch, 1, input_dim)
+        mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
+        obs_hat = self.reparameterize(mu_o, logvar_o)
 
-        pred_seq = []
-        input_t = obs_sequence[:,-1:,:]
+        return obs_hat, h
+        # pred_seq = []
+        # input_t = obs_sequence[:,-1:,:]
         
-        for _ in range(prediction_horizon):
-            action_sample = action_sequence[:, -1:, :] # (batch, 1, action_dim)
-            command_sample = obs_sequence[:, -1:, 9:12] # (batch, 1, 3)
-            obs_hat,h = self.gru(input_t, h) # out: (batch, 1, hidden_dim)
-            obs_hat = self.obs_head(obs_hat) # obs_hat: (batch, 1, input_dim)
-            mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
-            obs_hat = self.reparameterize(mu_o, logvar_o)
-            pred_seq.append(obs_hat)
-            input_t = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                 command_sample,               # cmd_tensor
-                                 obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                 action_sample
-                                ], dim=-1)
-             # use prediction as next input
+        # for _ in range(prediction_horizon):
+        #     action_sample = action_sequence[:, -1:, :] # (batch, 1, action_dim)
+        #     command_sample = obs_sequence[:, -1:, 9:12] # (batch, 1, 3)
+        #     obs_hat,h = self.gru(input_t, h) # out: (batch, 1, hidden_dim)
+        #     obs_hat = self.obs_head(obs_hat) # obs_hat: (batch, 1, input_dim)
+        #     mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
+        #     obs_hat = self.reparameterize(mu_o, logvar_o)
+        #     pred_seq.append(obs_hat)
+        #     input_t = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
+        #                          command_sample,               # cmd_tensor
+        #                          obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
+        #                          action_sample
+        #                         ], dim=-1)
+        #      # use prediction as next input
 
-        return torch.cat(pred_seq, dim=1)     # (batch, future_steps, input_dim)
+        # return torch.cat(pred_seq, dim=1)     # (batch, future_steps, input_dim)
     
     def autoregressive_training_step(self, obs, critic_obs, actions, alpha=1.0, writer=None,it=0):
         """

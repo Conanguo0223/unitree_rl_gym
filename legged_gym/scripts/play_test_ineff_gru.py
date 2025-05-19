@@ -63,7 +63,7 @@ def play(args):
     
     # build and load world model
     worldmodel = build_world_model_gru(env.num_obs, gru_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May13_01-55-42_/world_model_4999.pt"))
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_GRU_train/May15_15-21-34_/world_model_4999.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -92,7 +92,7 @@ def play(args):
         dones_list.append(dones)
         privilege_obs_list.append(privilege_obs)
 
-    batch_length = twm_cfg.batch_length # context length
+    batch_length = gru_cfg.batch_length # context length
     start_episode = 50
     imagine_horizon = max_episode_length - start_episode - batch_length
     obs_sample = torch.stack(obs_list, dim=1) # [env_num, episode_length, obs_dim]
@@ -117,9 +117,9 @@ def play(args):
             action_inference = action_sample[:,start_episode:start_episode+batch_length,:]
             for i in range(obs_inference.shape[1]):
                 if i == 0:
-                    last_obs_hat, h = worldmodel.gru(obs_inference[:,i:i+1])
+                    last_obs_hat, h = worldmodel(obs_inference[:,i:i+1])
                 else:
-                    last_obs_hat, h = worldmodel.gru(obs_inference[:,i:i+1], h)
+                    last_obs_hat, h = worldmodel(obs_inference[:,i:i+1], h)
             
             # H + 1 observation
             action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+1:start_episode+batch_length+dreaming_batch_length*(imag_step)+2,:]
@@ -131,7 +131,7 @@ def play(args):
             obs_sample_for_inference = torch.cat((obs_sample_for_inference, full_obs_for_inf),dim=1)
             obs_sample_for_compare = torch.cat((obs_sample_for_compare, last_obs_hat),dim=1)
             for i in range(dreaming_batch_length-1):
-                last_obs_hat, h = worldmodel.gru(obs_inference[:,i:i+1], h)
+                last_obs_hat, h = worldmodel(obs_inference[:,i:i+1], h)
                 action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+i+2:start_episode+batch_length+dreaming_batch_length*(imag_step)+3+i,:]
                 full_obs_for_inf = torch.cat([last_obs_hat[:, :, :9],       # First 9 elements of pred_obs
                                             cmd_tensor,               # cmd_tensor

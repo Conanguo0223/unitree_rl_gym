@@ -74,7 +74,8 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # build and load world model
-    worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
+    # worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
+    worldmodel = build_world_model_normal_small(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
     worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May13_01-55-42_/world_model_4999.pt"))
     # export policy as a jit module (used to run it from C++)
     
