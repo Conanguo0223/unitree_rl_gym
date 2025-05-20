@@ -1409,7 +1409,7 @@ class WorldModel_normal_small(nn.Module):
             dropout=0.0
         )
         self.obs_head = nn.Sequential(
-            nn.Linear(in_channels, self.mlp_hidden_size),
+            nn.Linear(transformer_hidden_dim, self.mlp_hidden_size),
             nn.ReLU()
         )
         self.bool_head = nn.Linear(self.mlp_hidden_size, self.bool_channles)

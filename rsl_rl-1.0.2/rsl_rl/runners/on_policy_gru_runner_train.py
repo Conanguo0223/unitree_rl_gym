@@ -104,7 +104,8 @@ class OnPolicy_GRU_Runner_train:
             num_envs = self.env.num_envs,
             max_length = self.rply_buff["max_len"],
             warmup_length = self.rply_buff["BufferWarmUp"],
-            store_on_gpu = self.rply_buff["ReplayBufferOnGPU"]
+            store_on_gpu = self.rply_buff["ReplayBufferOnGPU"],
+            device=self.device
         )
         
         

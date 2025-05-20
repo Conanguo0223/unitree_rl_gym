@@ -133,15 +133,15 @@ class StochasticTransformerKVCache_small(nn.Module):
     def __init__(self, input_dim, feat_dim, num_layers, num_heads, max_length, dropout):
         super().__init__()
         
-        feat_dim = input_dim
+        # feat_dim = input_dim
         self.feat_dim = feat_dim
         # mix image_embedding and action
-        # self.stem = nn.Sequential(
-        #     # nn.Linear(stoch_dim+action_dim, feat_dim, bias=False),
-        #     # nn.Linear(input_dim, feat_dim, bias=False),
-        #     nn.LayerNorm(feat_dim),
-        #     # nn.ReLU()
-        # )
+        self.stem = nn.Sequential(
+            # nn.Linear(stoch_dim+action_dim, feat_dim, bias=False),
+            nn.Linear(input_dim, feat_dim, bias=False),
+            nn.LayerNorm(feat_dim),
+            nn.ReLU()
+        )
         self.position_encoding = PositionalEncoding1D(max_length=max_length, embed_dim=feat_dim)
         # self.position_encoding = PositionalEncoding1D_sin(channels=feat_dim)
         # self.position_encoding = SinusoidalPositionalEncoding(embed_dim=feat_dim, max_length=max_length)
@@ -157,8 +157,8 @@ class StochasticTransformerKVCache_small(nn.Module):
         # action is not one hot
         # action = F.one_hot(action.long(), self.action_dim).float() 
         # feats = self.stem(torch.cat([samples, action], dim=-1))
-        # feats = self.stem(samples)
-        feats = self.position_encoding(samples)
+        feats = self.stem(samples)
+        feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
 
         for layer in self.layer_stack:
@@ -187,8 +187,8 @@ class StochasticTransformerKVCache_small(nn.Module):
 
         # action = F.one_hot(action.long(), self.action_dim).float()
         # feats = self.stem(torch.cat([samples, action], dim=-1))
-        # feats = self.stem(samples)
-        feats = self.position_encoding.forward_with_position(samples, position=self.kv_cache_list[0].shape[1])
+        feats = self.stem(samples)
+        feats = self.position_encoding.forward_with_position(feats, position=self.kv_cache_list[0].shape[1])
         feats = self.layer_norm(feats)
 
         for idx, layer in enumerate(self.layer_stack):
@@ -204,8 +204,8 @@ class StochasticTransformerKVCache_small(nn.Module):
         # action is not one hot
         # action = F.one_hot(action.long(), self.action_dim).float() 
         # feats = self.stem(torch.cat([samples, action], dim=-1))
-        # feats = self.stem(samples)
-        feats = self.position_encoding(samples)
+        feats = self.stem(samples)
+        feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
 
         for idx, layer in enumerate(self.layer_stack):

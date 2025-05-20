@@ -399,7 +399,7 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 128
+        twm_hidden_dim = 64
         twm_num_layers = 4
         twm_num_heads = 1
         twm_train_steps = 1 # train the transformer per this many steps
@@ -526,7 +526,7 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
         gru_start_train_steps = 0 # start training the gru after this many steps
         gru_start_train_policy_steps = 10 # start training the policy using dynamics after this many steps
         dreaming_batch_size = 4096 # batch size for dreaming 
-        batch_length = 40
+        batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
         train_tokenizer_times = 0
@@ -646,7 +646,7 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
         gru_start_train_steps = 0 # start training the gru after this many steps
         gru_start_train_policy_steps = 10 # start training the policy using dynamics after this many steps
         dreaming_batch_size = 4096 # batch size for dreaming 
-        batch_length = 40
+        batch_length = 32
         demonstration_batch_size = 0 # batch size for external data
         train_agent_steps = 2 # train the agent this many steps using dynamics
         train_tokenizer_times = 0
