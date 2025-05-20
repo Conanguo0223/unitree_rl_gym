@@ -74,7 +74,8 @@ class OnPolicy_GRU_Runner_train:
         else:
             self.num_critic_obs = self.env.num_obs
         self.num_critic_obs = self.env.num_obs
-        self.worldmodel = build_world_model_gru(self.env.num_obs, self.gru_cfg, privileged_dim = self.env.num_privileged_obs)
+        self.num_bool_states = 12
+        self.worldmodel = build_world_model_gru(self.env.num_privileged_obs - self.num_bool_states, self.gru_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class

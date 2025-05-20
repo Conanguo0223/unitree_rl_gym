@@ -11,13 +11,15 @@ from rsl_rl.modules.sub_models.world_models import WorldModel_GRU
 import numpy as np
 import torch
 
-def pd_control(actions, q, target_dq, dq, default_dof):
+def pd_control(actions, dof_pos_diff, dof_vel):
     """Calculates torques from position commands"""
-    action_scaled = 0.25*actions
-    action_scaled += default_dof
-    kp = 20.0
-    kd = 0.5
-    return (action_scaled - q) * kp + (target_dq - dq) * kd
+    actions_scaled = actions * 0.25
+    # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
+    # dof_vel = obs[21:33]/obs_scales.dof_vel
+    dof_pos_diff = dof_pos_diff / 1.0
+    dof_vel = dof_vel / 0.05
+    torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
+    return torques
 
 def build_world_model(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel_GRU(
@@ -62,8 +64,8 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # build and load world model
-    worldmodel = build_world_model_gru(env.num_obs, gru_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_GRU_train/May15_15-21-34_/world_model_4999.pt"))
+    worldmodel = build_world_model_gru(env.num_privileged_obs-12, gru_cfg, privileged_dim = env.num_privileged_obs)
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_GRU_train/May19_17-31-17_/world_model_4999.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -102,7 +104,7 @@ def play(args):
     dones_sample = torch.stack(dones_list, dim=1) # [env_num, episode_length, action_dim]
     
     obs_sample_for_compare = privilege_obs_sample[:, :start_episode+batch_length]
-    obs_sample_for_inference = obs_sample[:,:start_episode+batch_length,:]
+    obs_sample_for_inference = privilege_obs_sample[:,:start_episode+batch_length,:45]
     dreaming_batch_length = 8
     with torch.inference_mode():
         worldmodel.eval()
@@ -117,26 +119,24 @@ def play(args):
             action_inference = action_sample[:,start_episode:start_episode+batch_length,:]
             for i in range(obs_inference.shape[1]):
                 if i == 0:
-                    last_obs_hat, h = worldmodel(obs_inference[:,i:i+1])
+                    last_obs_hat, h = worldmodel(obs_inference[:,i:i+1,:45])
                 else:
-                    last_obs_hat, h = worldmodel(obs_inference[:,i:i+1], h)
+                    last_obs_hat, h = worldmodel(obs_inference[:,i:i+1,:45], h)
             
             # H + 1 observation
             action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+1:start_episode+batch_length+dreaming_batch_length*(imag_step)+2,:]
-            full_obs_for_inf = torch.cat([last_obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                          cmd_tensor,               # cmd_tensor
-                                            last_obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                            action_sample_current
+            torque = pd_control(action_sample_current, last_obs_hat[:, -1, 9:21], last_obs_hat[:, :, 21:33])
+            full_obs_for_inf = torch.cat([last_obs_hat[:, :, :33],       # First 9 elements of pred_obs
+                                          torque
                                             ], dim=-1)
             obs_sample_for_inference = torch.cat((obs_sample_for_inference, full_obs_for_inf),dim=1)
             obs_sample_for_compare = torch.cat((obs_sample_for_compare, last_obs_hat),dim=1)
             for i in range(dreaming_batch_length-1):
-                last_obs_hat, h = worldmodel(obs_inference[:,i:i+1], h)
+                last_obs_hat, h = worldmodel(obs_inference[:,i:i+1,:45], h)
                 action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+i+2:start_episode+batch_length+dreaming_batch_length*(imag_step)+3+i,:]
-                full_obs_for_inf = torch.cat([last_obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                            cmd_tensor,               # cmd_tensor
-                                            last_obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                            action_sample_current
+                torque = pd_control(action_sample_current, last_obs_hat[:, -1, 9:21], last_obs_hat[:, :, 21:33])
+                full_obs_for_inf = torch.cat([last_obs_hat[:, :, :33],       # First 9 elements of pred_obs
+                                              torque
                                             ], dim=-1)
                 obs_sample_for_inference = torch.cat((obs_sample_for_inference, full_obs_for_inf),dim=1)
                 obs_sample_for_compare = torch.cat((obs_sample_for_compare, last_obs_hat),dim=1)

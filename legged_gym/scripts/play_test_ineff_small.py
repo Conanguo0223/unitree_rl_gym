@@ -10,14 +10,17 @@ from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Log
 from rsl_rl.modules.sub_models.world_models import WorldModel_normal_small, WorldModel, WorldModel_normal
 import numpy as np
 import torch
+from rsl_rl.modules.sub_models.attention_blocks import get_subsequent_mask_with_batch_length
 
-def pd_control(actions, q, target_dq, dq, default_dof):
+def pd_control(actions, dof_pos_diff, dof_vel):
     """Calculates torques from position commands"""
-    action_scaled = 0.25*actions
-    action_scaled += default_dof
-    kp = 20.0
-    kd = 0.5
-    return (action_scaled - q) * kp + (target_dq - dq) * kd
+    actions_scaled = actions * 0.25
+    # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
+    # dof_vel = obs[21:33]/obs_scales.dof_vel
+    dof_pos_diff = dof_pos_diff / 1.0
+    dof_vel = dof_vel / 0.05
+    torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
+    return torques
 
 def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel_normal(
@@ -72,11 +75,11 @@ def play(args):
     train_cfg.runner.resume = True
     ppo_runner, train_cfg, train_cfg_dict, log_dir = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
-    
+    num_bool_states = 12
     # build and load world model
     # worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel = build_world_model_normal_small(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May13_01-55-42_/world_model_4999.pt"))
+    worldmodel = build_world_model_normal_small(env.num_privileged_obs - num_bool_states, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May19_20-05-25_/world_model_4999.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -115,7 +118,7 @@ def play(args):
     dones_sample = torch.stack(dones_list, dim=1) # [env_num, episode_length, action_dim]
     
     obs_sample_for_compare = privilege_obs_sample[:, :start_episode+batch_length]
-    obs_sample_for_inference = obs_sample[:,:start_episode+batch_length,:]
+    obs_sample_for_inference = privilege_obs_sample[:,:start_episode+batch_length,:45]
     dreaming_batch_length = 8
     with torch.inference_mode():
         worldmodel.eval()
@@ -125,40 +128,19 @@ def play(args):
         cmd_tensor = cmd_tensor.repeat(dreaming_batch_size,1,1)
         steps = imagine_horizon// dreaming_batch_length
         for imag_step in range(steps):
-            # get observations
+            # get context observations
             obs_inference = obs_sample_for_inference[:,-batch_length:,:]
-            action_inference = action_sample[:,start_episode:start_episode+batch_length,:]
-            # feed it through the world model
-            worldmodel.init_imagine_buffer(dreaming_batch_size, dreaming_batch_length, dtype=worldmodel.tensor_dtype)
-            worldmodel.storm_transformer.reset_kv_cache_list(dreaming_batch_size, worldmodel.tensor_dtype)
-            # aggregate the context latent
-            for i in range(obs_inference.shape[1]):
-                last_obs_hat, last_termination_hat, last_latent, last_dist_feat = worldmodel.imagine_step(
-                    _, obs_inference[:, i:i+1], action_inference[:,i:i+1], _, _, _
-                )
-            # H + 1 observation
-            action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+1:start_episode+batch_length+dreaming_batch_length*(imag_step)+2,:]
-            full_obs_for_inf = torch.cat([last_obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                          cmd_tensor,               # cmd_tensor
-                                            last_obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                            action_sample_current
-                                            ], dim=-1)
-            obs_sample_for_inference = torch.cat((obs_sample_for_inference, full_obs_for_inf),dim=1)
-            obs_sample_for_compare = torch.cat((obs_sample_for_compare, last_obs_hat),dim=1)
-            for i in range(dreaming_batch_length-1):
-                last_obs_hat, critic_obs_sample, reward_sample_img, termination_sample_img = worldmodel.imagine_step(
-                    _,
-                    full_obs_for_inf,
-                    action_sample_current,_,_,_
-                )
+            for i in range(dreaming_batch_length):
+                temporal_mask = get_subsequent_mask_with_batch_length(batch_length+i, obs.device)
+                obs_hat, trans_feat = worldmodel.predict_next_without_kv_cache(obs_inference,temporal_mask)
                 action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+i+2:start_episode+batch_length+dreaming_batch_length*(imag_step)+3+i,:]
-                full_obs_for_inf = torch.cat([last_obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                            cmd_tensor,               # cmd_tensor
-                                            last_obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                            action_sample_current
-                                            ], dim=-1)
-                obs_sample_for_inference = torch.cat((obs_sample_for_inference, full_obs_for_inf),dim=1)
-                obs_sample_for_compare = torch.cat((obs_sample_for_compare, last_obs_hat),dim=1)
+                torques = pd_control(action_sample_current, obs_hat[:, -1:, 9:21], obs_hat[:, -1:, 21:33])
+                obs_hat_inf = torch.cat([obs_hat[:, -1:, :33],       # First 9 elements of pred_obs
+                                     torques,   # Remaining elements of pred_obs (from index 9 to 32)
+                                    ], dim=-1)
+                obs_inference = torch.cat((obs_inference, obs_hat_inf),dim=1)
+                obs_sample_for_inference = torch.cat((obs_sample_for_inference, obs_hat_inf),dim=1)
+                obs_sample_for_compare = torch.cat((obs_sample_for_compare, obs_hat[:,-1:,:]),dim=1)
             
             # imag_step += 8
  

@@ -255,11 +255,11 @@ class GO2RoughCfgTWM_val( LeggedRobotCfg ):
 
     class commands(LeggedRobotCfg.commands):
         class ranges(LeggedRobotCfg.commands.ranges):
-            lin_vel_x = [0.5, 0.5] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
-            lin_vel_y = [0.0, 0.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
-            ang_vel_yaw = [0.0, 0.0] # [-1, 1] [0.0, 0.0]   # min max [rad/s]
-            heading = [0.0, 0.0] # [-3.14, 3.14] [0.0, 0.0]
-
+            lin_vel_x = [-1.0, 1.0] #[-1.0, 1.0] [0.5,0.5] # min max [m/s]
+            lin_vel_y = [-1.0, 1.0] # [-1.0, 1.0] [0.0, 0.0]  # min max [m/s]
+            ang_vel_yaw = [-1.0, 1.0]   # [-1, 1] [0.0, 0.0]   # min max [rad/s]
+            heading = [-3.14, 3.14] # [-3.14, 3.14] [0.0, 0.0]
+            
     class noise(LeggedRobotCfg.noise):
         add_noise = False
         noise_level = 1.0 # scales other values
@@ -541,12 +541,12 @@ class GO2RoughCfgPPOGRU_train( LeggedRobotCfgPPO):
         #     entropyCoef = 3E-4
         #     use_context = False
     class buffer():
-        max_len = 10000
+        max_len = 100000
         BufferWarmUp = 4096
         ReplayBufferOnGPU = True
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        num_steps_per_env = 400 # per iteration
+        num_steps_per_env = 100 # per iteration
         experiment_name = 'rough_go2_GRU_train'
         max_iterations = 5000
 

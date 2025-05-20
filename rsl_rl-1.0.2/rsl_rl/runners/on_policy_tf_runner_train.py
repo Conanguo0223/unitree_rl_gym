@@ -112,9 +112,10 @@ class OnPolicy_WM_Runner_train:
         else:
             self.num_critic_obs = self.env.num_obs
         self.num_critic_obs = self.env.num_obs
+        self.num_bool_states = 12
         # self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.worldmodel = build_world_model_normal(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
-        self.worldmodel = build_world_model_normal_small(self.env.num_obs, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
+        self.worldmodel = build_world_model_normal_small(self.env.num_privileged_obs - self.num_bool_states, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class

@@ -1235,6 +1235,7 @@ class WorldModel_GRU(nn.Module):
         self.mlp_hidden_size = mlp_hidden_size
         self.decoder_out_channels = decoder_out_channels
         self.gru_hidden_size = gru_hidden_size
+        self.bool_channles = 12
         # GRU: Processes sequential data
         self.gru = nn.GRU(input_size=obs_dim, hidden_size=gru_hidden_size, num_layers=2, batch_first=True)
         
@@ -1242,8 +1243,9 @@ class WorldModel_GRU(nn.Module):
         self.obs_head = nn.Sequential(
             nn.Linear(gru_hidden_size, mlp_hidden_size),
             nn.ReLU(),
-            nn.Linear(mlp_hidden_size, 2*decoder_out_channels)
         )
+        self.bool_head = nn.Linear(self.mlp_hidden_size, self.bool_channles)
+        self.float_head = nn.Linear(self.mlp_hidden_size, 2*(decoder_out_channels - self.bool_channles))
         self.mse_loss_func_obs = MSELoss()
         self.mse_loss_hidden = MSELoss_GRU_hid()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
@@ -1280,8 +1282,12 @@ class WorldModel_GRU(nn.Module):
         else:
             out, h = self.gru(obs_sequence, h)
         obs_hat = self.obs_head(out) # obs_hat: (batch, 1, input_dim)
-        mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
+        obs_dist = self.float_head(obs_hat)
+        bool_logits = self.bool_head(obs_hat)
+        bool_out = torch.sigmoid(bool_logits)
+        mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
         obs_hat = self.reparameterize(mu_o, logvar_o)
+        obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
 
         return obs_hat, h
         # pred_seq = []
@@ -1304,7 +1310,16 @@ class WorldModel_GRU(nn.Module):
 
         # return torch.cat(pred_seq, dim=1)     # (batch, future_steps, input_dim)
     
-    def autoregressive_training_step(self, obs, critic_obs, actions, alpha=1.0, writer=None,it=0):
+    def compute_torques(self, actions, dof_pos_diff, dof_vel):
+        actions_scaled = actions * 0.25
+        # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
+        # dof_vel = obs[21:33]/obs_scales.dof_vel
+        dof_pos_diff = dof_pos_diff / 1.0
+        dof_vel = dof_vel / 0.05
+        torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
+        return torques
+
+    def autoregressive_training_step(self, obs, critic_obs, actions, alpha=1.0, context_length=32, pred_length=8,writer=None,it=0):
         """
         model: RWMGRUWorldModel
         obs: (B, T, D)
@@ -1318,28 +1333,31 @@ class WorldModel_GRU(nn.Module):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # obs_context = obs[:, :32, :] # (B, 32, D)
             h_full = []
-            for i in range(40):
-                obs_hat, h = self.gru(obs[:, i:i+1, :]) # (B, 1, D)
+            # get the hidden state for the 40 steps
+            obs_hat, h = self.forward(critic_obs[:, 0:1, :45]) # (B, 32, D)
+            h_full.append(h)
+            for i in range(context_length+pred_length-1):
+                obs_hat, h = self.forward(critic_obs[:, i+1:i+2, :45], h) # (B, 1, D)
                 h_full.append(h)
+            # the full hidden states for the 40 steps
             h_full = torch.stack(h_full) # (B, 32, D)
-            prediction_horizon = 8
-            input_t = obs[:,31:32,:]
+            # get the first input for the autoregressive model
+            input_t = critic_obs[:,31:32,:45]
             h = h_full[31] # (B, 1, D)
-            for i in range(prediction_horizon):
+            for i in range(pred_length):
+                # predict the 32+i step
+                obs_hat,h = self.forward(input_t, h) # out: (batch, 1, hidden_dim)
                 action_sample = actions[:, 32+i:32+1+i, :] # (batch, 1, action_dim)
-                command_sample = obs[:,  32+i:32+1+i, 9:12] # (batch, 1, 3)
-                obs_hat,h = self.gru(input_t, h) # out: (batch, 1, hidden_dim)
-                obs_hat = self.obs_head(obs_hat) # obs_hat: (batch, 1, input_dim)
-                mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
-                obs_hat = self.reparameterize(mu_o, logvar_o)
-                input_t = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                    command_sample,               # cmd_tensor
-                                    obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                    action_sample
+                torques = self.compute_torques(action_sample, obs_hat[:, :, 9:21], obs_hat[:, :, 21:33])
+                input_t = torch.cat([obs_hat[:, :, :33],       # First 9 elements of pred_obs
+                                     torques
                                     ], dim=-1)
                 obs_hats.append(obs_hat)
+                # loss for continuous states
                 total_loss += alpha**i * self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,32+i:32+i+1,:45])
+                # loss for contact states
                 total_loss += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,32+i:32+i+1,45:])
+                # loss for latent states
                 total_loss += alpha**i * self.mse_loss_hidden(h.permute(1,0,2),h_full[32+i].permute(1,0,2))
                 # use prediction as next input
          # gradient descent
@@ -1381,7 +1399,7 @@ class WorldModel_normal_small(nn.Module):
         self.imagine_batch_size = -1
         self.imagine_batch_length = -1
         self.in_channels = in_channels
-
+        self.bool_channles = 12
         self.storm_transformer = StochasticTransformerKVCache_small(
             input_dim=in_channels,
             feat_dim=transformer_hidden_dim,
@@ -1392,9 +1410,10 @@ class WorldModel_normal_small(nn.Module):
         )
         self.obs_head = nn.Sequential(
             nn.Linear(in_channels, self.mlp_hidden_size),
-            nn.ReLU(),
-            nn.Linear(self.mlp_hidden_size, 2*decoder_out_channels)
+            nn.ReLU()
         )
+        self.bool_head = nn.Linear(self.mlp_hidden_size, self.bool_channles)
+        self.float_head = nn.Linear(self.mlp_hidden_size, 2*(decoder_out_channels - self.bool_channles))
         self.mse_loss = MSELoss()
         self.logcosh_loss = log_cosh_loss()
         self.ce_loss = nn.CrossEntropyLoss()
@@ -1418,11 +1437,26 @@ class WorldModel_normal_small(nn.Module):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             trans_feat = self.storm_transformer.forward_with_kv_cache(sample)# transformer features
             obs_hat = self.obs_head(trans_feat)
-            mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
             obs_hat = self.reparameterize(mu_o, logvar_o)
-
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
         return obs_hat, trans_feat
     
+    def predict_next_without_kv_cache(self, sample, mask):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            trans_feat = self.storm_transformer.forward(sample, mask) # transformer features
+            obs_hat = self.obs_head(trans_feat)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
+            obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
+        return obs_hat, trans_feat
+
     def reparameterize(self, mu, log_var):
         # Compute the standard deviation from the log variance
         std = torch.exp(0.5 * log_var) + 1e-6
@@ -1431,6 +1465,15 @@ class WorldModel_normal_small(nn.Module):
         # Return the reparameterized sample
         return q.rsample()
     
+    def compute_torques(self, actions, dof_pos_diff, dof_vel):
+        actions_scaled = actions * 0.25
+        # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
+        # dof_vel = obs[21:33]/obs_scales.dof_vel
+        dof_pos_diff = dof_pos_diff / 1.0
+        dof_vel = dof_vel / 0.05
+        torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
+        return torques
+
     def flatten_sample(self, sample):
         return rearrange(sample, "B L K C -> B L (K C)")
 
@@ -1445,8 +1488,12 @@ class WorldModel_normal_small(nn.Module):
             temporal_mask = get_subsequent_mask_with_batch_length(batch_length, device=sample_obs.device)
             trans_feat = self.storm_transformer.forward_context(sample_obs, temporal_mask)
             obs_hat = self.obs_head(trans_feat) # obs_hat: (batch, 1, input_dim)
-            mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
             obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
 
         return obs_hat[:, -1:,:], trans_feat[:, -1:,:]
 
@@ -1460,15 +1507,12 @@ class WorldModel_normal_small(nn.Module):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             temporal_mask = get_subsequent_mask_with_batch_length(batch_length, obs.device)
             # get transformer features
-            trans_feat = self.storm_transformer(obs,temporal_mask)
-
-            obs_hat = self.obs_head(trans_feat) # obs_hat: (batch, 1, input_dim)
-            mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
-            obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat, trans_feat = self.predict_next_without_kv_cache(critic_obs[:,:,:45],temporal_mask)
 
             # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
+            # reconstruction_loss for continuous states
             reconstruction_loss = self.mse_loss(obs_hat[:,:-1,:45], critic_obs[:,1:,:45])
+            # reconstruction_loss for contact states
             reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:-1,45:], critic_obs[:,1:,45:])
 
             reconstruction_loss = reconstruction_loss + reconstruction_loss_contact
@@ -1504,7 +1548,7 @@ class WorldModel_normal_small(nn.Module):
         if return_loss:
             return reconstruction_loss
     
-    def update_autoregressive(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
+    def update_autoregressive(self, obs, critic_obs, action, context_length, pred_length, it, writer: SummaryWriter):
         self.train()
         batch_size, batch_length = obs.shape[:2]
         context_length = 32
@@ -1512,29 +1556,34 @@ class WorldModel_normal_small(nn.Module):
         total_loss = 0
         obs_hats = []
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # temporal_mask = get_subsequent_mask_with_batch_length(batch_length, obs.device)
-            # self.storm_transformer.eval()
-            # trans_feat_full = self.storm_transformer(obs, temporal_mask)
-            # self.storm_transformer.train()
-            # pass through the context and get the first prediction
-            obs_hat, trans_feat = self.setup_imagination_train(obs.shape[0], obs[:,:32,:], 32)
-            total_loss += self.mse_loss(obs_hat[:,:,:45], critic_obs[:,32:33,:45])
-            total_loss += self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,32:33,45:])
-            # total_loss += self.mse_loss(trans_feat[:,:,:], trans_feat_full[:,32:33,:])
-            alpha = 1.0
-            obs_hats.append(obs_hat)
-            for i in range(prediction_horizon-1):
-                action_sample = action[:, 32+i:32+i+1, :]
-                pred_obs_full = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                        obs[:,32+i:32+i+1,9:12],               # cmd_tensor
-                                            obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                            action_sample
-                                            ], dim=-1)
-                
-                obs_hat, trans_feat = self.predict_next(pred_obs_full)
-                obs_hats.append(obs_hat)
-                total_loss += alpha**i * self.mse_loss(obs_hat[:,:,:45], critic_obs[:,33+i:33+i+1,:45])
-                total_loss += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,33+i:33+i+1,45:])
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, obs.device)
+            # get transformer features
+            obs_hat, trans_feat_full = self.predict_next_without_kv_cache(critic_obs[:,:,:45],temporal_mask)
+
+            alpha = 0.9
+            # get the context input for the autoregressive model
+            obs_inputs = critic_obs[:,:32,:45]
+            for i in range(prediction_horizon):
+                # action_sample = action[:, 32+i:32+i+1, :]
+                # pred_obs_full = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
+                #                         obs[:,32+i:32+i+1,9:12],               # cmd_tensor
+                #                             obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
+                #                             action_sample
+                #                             ], dim=-1)
+                temporal_mask = get_subsequent_mask_with_batch_length(context_length+i, obs.device)
+                obs_hat, trans_feat = self.predict_next_without_kv_cache(obs_inputs,temporal_mask)
+                torques = self.compute_torques(action[:, 32+i:32+i+1, :], obs_hat[:, -1:, 9:21], obs_hat[:, -1:, 21:33])
+                obs_hat_for_input = torch.cat([obs_hat[:, -1:, :33],       # First 9 elements of pred_obs
+                                     torques,   # Remaining elements of pred_obs (from index 9 to 32)
+                                    ], dim=-1)
+                obs_inputs = torch.cat([obs_inputs, obs_hat_for_input], dim=1)
+                obs_hats.append(obs_hat[:,-1:,:])
+                # loss for continuous states
+                total_loss += alpha**i * self.mse_loss(obs_hat[:,-1:,:45], critic_obs[:,32+i:32+i+1,:45])
+                # loss for contact states
+                total_loss += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,-1:,45:], critic_obs[:,32+i:32+i+1,45:])
+                # loss for latent states
+                total_loss += alpha**i * self.mse_loss(trans_feat[:,-1:,:],trans_feat_full[:,32+i:32+i+1,:])
                 # total_loss += alpha**i * self.mse_loss(trans_feat, trans_feat_full[:,33+i:33+i+1,:].detach())
 
         # gradient descent
