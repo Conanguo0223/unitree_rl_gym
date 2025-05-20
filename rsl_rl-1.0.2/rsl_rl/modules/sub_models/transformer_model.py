@@ -166,13 +166,13 @@ class StochasticTransformerKVCache_small(nn.Module):
 
         return feats
 
-    def reset_kv_cache_list(self, batch_size, dtype):
+    def reset_kv_cache_list(self, batch_size, dtype, device):
         '''
         Reset self.kv_cache_list
         '''
         self.kv_cache_list = []
         for layer in self.layer_stack:
-            self.kv_cache_list.append(torch.zeros(size=(batch_size, 0, self.feat_dim), dtype=dtype, device="cuda"))
+            self.kv_cache_list.append(torch.zeros(size=(batch_size, 0, self.feat_dim), dtype=dtype, device=device))
 
     def forward_with_kv_cache(self, samples):
         '''

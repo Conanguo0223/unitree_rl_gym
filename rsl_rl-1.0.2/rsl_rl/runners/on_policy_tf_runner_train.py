@@ -150,7 +150,8 @@ class OnPolicy_WM_Runner_train:
             num_envs = self.env.num_envs,
             max_length = self.rply_buff["max_len"],
             warmup_length = self.rply_buff["BufferWarmUp"],
-            store_on_gpu = self.rply_buff["ReplayBufferOnGPU"]
+            store_on_gpu = self.rply_buff["ReplayBufferOnGPU"],
+            device = self.device
         )
         
         
@@ -290,7 +291,7 @@ class OnPolicy_WM_Runner_train:
                 
                 # 3-2 train dynamics
                 for it_wm in range(self.train_dynamics_times):
-                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len)
+                    obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample = self.replay_buffer.sample(batch_size, self.twm_max_len, to_device = self.device)
                     if it_wm < self.train_dynamics_times-1:
                         self.worldmodel.update_autoregressive(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)
                         # self.worldmodel.update(obs_sample, critic_obs_sample, action_sample, reward_sample, termination_sample, -1, writer=self.writer)

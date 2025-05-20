@@ -131,10 +131,10 @@ class ReplayBuffer():
 
 # saves exeperience per time sequence
 class ReplayBuffer_seq():
-    def __init__(self, obs_shape, priv_obs_shape, action_shape, num_envs, num_steps_per_env, max_length=128000, warmup_length=50000, store_on_gpu=False) -> None:
+    def __init__(self, obs_shape, priv_obs_shape, action_shape, num_envs, num_steps_per_env, max_length=128000, warmup_length=50000, store_on_gpu=False, device = "cuda") -> None:
         self.store_on_gpu = store_on_gpu
         actual_max_length = (max_length//num_envs)*num_envs
-        self.device = "cuda" if store_on_gpu else "cpu"
+        self.device = device if store_on_gpu else "cpu"
         self.obs_buffer = torch.empty((actual_max_length, num_steps_per_env, *obs_shape), dtype=torch.float32, device=self.device, requires_grad=False)
         self.priv_obs_buffer = torch.empty((actual_max_length, num_steps_per_env, *priv_obs_shape), dtype=torch.float32, device=self.device, requires_grad=False)
         self.action_buffer = torch.empty((actual_max_length, num_steps_per_env, *action_shape), dtype=torch.float32, device=self.device, requires_grad=False)
@@ -228,10 +228,10 @@ class ReplayBuffer_seq():
 
 # saves exeperience per time sequence
 class ReplayBuffer_seq_new():
-    def __init__(self, obs_shape, priv_obs_shape, action_shape, num_envs, num_steps_per_env, max_length=128000, warmup_length=50000, store_on_gpu=False) -> None:
+    def __init__(self, obs_shape, priv_obs_shape, action_shape, num_envs, num_steps_per_env, device, max_length=128000, warmup_length=50000, store_on_gpu=False) -> None:
         self.store_on_gpu = store_on_gpu
         self.max_length = max_length
-        self.device = "cuda" if store_on_gpu else "cpu"
+        self.device = device if store_on_gpu else "cpu"
         self.obs_buffer = torch.empty((max_length, num_steps_per_env, *obs_shape), dtype=torch.float32, device=self.device, requires_grad=False)
         self.priv_obs_buffer = torch.empty((max_length, num_steps_per_env, *priv_obs_shape), dtype=torch.float32, device=self.device, requires_grad=False)
         self.action_buffer = torch.empty((max_length, num_steps_per_env, *action_shape), dtype=torch.float32, device=self.device, requires_grad=False)
