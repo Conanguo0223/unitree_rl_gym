@@ -36,7 +36,7 @@ import statistics
 from torch.utils.tensorboard import SummaryWriter
 import torch
 from einops import rearrange
-from rsl_rl.algorithms import PPO
+from rsl_rl.algorithms import PPO, PPO_test
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
 from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal, WorldModel_normal_small
@@ -187,7 +187,8 @@ class OnPolicy_WM_Runner_Val:
             print("loaded pretrained policy")
         
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        # self.alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg)
+        self.alg: PPO_test = alg_class(actor_critic, device=self.device, **self.alg_cfg)
 
         # bigger replay buffer for the world model
         self.num_steps_per_env = self.cfg["num_steps_per_env"] # 40, this is also the context length
@@ -220,9 +221,7 @@ class OnPolicy_WM_Runner_Val:
         self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
         self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
         # init storage and model for the policy
-        num_step_for_ppo = 24
-        self.alg.init_storage_dream(self.env.num_envs, num_step_for_ppo, [self.env.num_obs], [self.env.num_obs], [self.env.num_actions], self.dreaming_batch_size)
-        # self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_obs], [self.env.num_actions], self.dreaming_batch_size)
+        self.alg.init_storage_dream(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [self.env.num_obs], [self.env.num_actions], self.dreaming_batch_size)
         # self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs], [None], [self.env.num_actions])
         # Log
         self.log_dir = log_dir

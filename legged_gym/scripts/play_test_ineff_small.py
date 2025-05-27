@@ -65,9 +65,9 @@ def play(args):
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
     env_cfg.commands.ranges.lin_vel_x = [0.5,0.5]
-    env_cfg.commands.ranges.lin_vel_y = [0.5,0.5]
-    env_cfg.commands.ranges.ang_vel_yaw = [0.5,0.5]
-    env_cfg.commands.ranges.heading = [1.57,1.57]
+    env_cfg.commands.ranges.lin_vel_y = [0.0,0.0]
+    env_cfg.commands.ranges.ang_vel_yaw = [0.0,0.0]
+    env_cfg.commands.ranges.heading = [0.0,0.0]
     env_cfg.env.test = True
     twm_cfg = train_cfg.twm
 
@@ -82,7 +82,7 @@ def play(args):
     # build and load world model
     # worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
     worldmodel = build_world_model_normal_small(env.num_privileged_obs - num_bool_states, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_13-52-32_/world_model_4999.pt"))
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_23-25-41_/world_model_4700.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:

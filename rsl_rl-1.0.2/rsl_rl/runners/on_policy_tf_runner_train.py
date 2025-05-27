@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal, WorldModel_normal_small
+from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal_small_test, WorldModel_normal, WorldModel_normal_small
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq, ReplayBuffer_seq_new
@@ -75,7 +75,8 @@ def build_world_model_normal_small(in_channels, action_dim, twm_cfg,privileged_d
         transformer_max_length = twm_cfg["twm_max_len"],
         transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
         transformer_num_layers = twm_cfg["twm_num_layers"],
-        transformer_num_heads = twm_cfg["twm_num_heads"]
+        transformer_num_heads = twm_cfg["twm_num_heads"],
+        lr=1e-3
     ).cuda()
 
 def imagine_one_step(worldmodel: WorldModel, sample_obs, sample_action):

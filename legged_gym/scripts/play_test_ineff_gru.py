@@ -52,9 +52,9 @@ def play(args):
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
     env_cfg.commands.ranges.lin_vel_x = [0.5,0.5]
-    env_cfg.commands.ranges.lin_vel_y = [0.5,0.5]
-    env_cfg.commands.ranges.ang_vel_yaw = [0.5,0.5]
-    env_cfg.commands.ranges.heading = [1.57,1.57]
+    env_cfg.commands.ranges.lin_vel_y = [0.0,0.0]
+    env_cfg.commands.ranges.ang_vel_yaw = [0.0,0.0]
+    env_cfg.commands.ranges.heading = [0.0,0.0]
     env_cfg.env.test = True
     gru_cfg = train_cfg.gru
 

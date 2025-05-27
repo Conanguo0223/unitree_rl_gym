@@ -250,17 +250,17 @@ class DistHeadVAE(nn.Module):
     '''
     Dist: abbreviation of distribution for VAE
     '''
-    def __init__(self, image_feat_dim, transformer_hidden_dim, stoch_dim) -> None:
+    def __init__(self, image_feat_dim, transformer_hidden_dim, hidden_dim) -> None:
         super().__init__()
         # TODO: add init_noise_std?
-        self.stoch_dim = stoch_dim
+        self.stoch_dim = hidden_dim
         # self.post_head = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
         # self.prior_head = nn.Linear(transformer_hidden_dim, stoch_dim*stoch_dim)
-        self.mu_in = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
-        self.log_var_in = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
+        self.mu_in = nn.Linear(image_feat_dim, self.stoch_dim)
+        self.log_var_in = nn.Linear(image_feat_dim, self.stoch_dim)
 
-        self.mu_out = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
-        self.log_var_out = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
+        self.mu_out = nn.Linear(transformer_hidden_dim, self.stoch_dim)
+        self.log_var_out = nn.Linear(transformer_hidden_dim, self.stoch_dim)
         # Initialize weights and biases
         self._initialize_weights()
 
@@ -1389,7 +1389,8 @@ class WorldModel_GRU(nn.Module):
 
 class WorldModel_normal_small(nn.Module):
     def __init__(self, in_channels, decoder_out_channels, action_dim,
-                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
+                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads,
+                 lr = 1e-3):
         super().__init__()
         self.transformer_hidden_dim = transformer_hidden_dim
         self.decoder_out_channels = decoder_out_channels
@@ -1419,7 +1420,7 @@ class WorldModel_normal_small(nn.Module):
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
         self.kl_div_loss = KLDivLoss(free_bits = 1.0)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3,weight_decay=1e-5)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr,weight_decay=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1500, gamma=0.1)
 
@@ -1548,7 +1549,7 @@ class WorldModel_normal_small(nn.Module):
         if return_loss:
             return reconstruction_loss
     
-    def update_autoregressive(self, obs, critic_obs, action, context_length, pred_length, it, writer: SummaryWriter):
+    def update_autoregressive(self, obs, critic_obs, action, context_length, pred_length, it, writer: SummaryWriter, return_loss=False):
         self.train()
         batch_size, batch_length = obs.shape[:2]
         context_length = 32
@@ -1560,7 +1561,7 @@ class WorldModel_normal_small(nn.Module):
             # get transformer features
             obs_hat, trans_feat_full = self.predict_next_without_kv_cache(critic_obs[:,:,:45],temporal_mask)
 
-            alpha = 0.9
+            alpha = 1.0
             # get the context input for the autoregressive model
             obs_inputs = critic_obs[:,:32,:45]
             for i in range(prediction_horizon):
@@ -1612,3 +1613,258 @@ class WorldModel_normal_small(nn.Module):
             writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
             writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
             writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
+        if return_loss:
+            return total_loss.detach().cpu()
+
+class WorldModel_normal_small_test(nn.Module):
+    def __init__(self, in_channels, decoder_out_channels, action_dim,
+                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
+        super().__init__()
+        self.transformer_hidden_dim = transformer_hidden_dim
+        self.decoder_out_channels = decoder_out_channels
+        self.mlp_hidden_size = 128
+        self.use_amp = True
+        self.tensor_dtype = torch.bfloat16 if self.use_amp else torch.float32
+        self.imagine_batch_size = -1
+        self.imagine_batch_length = -1
+        self.in_channels = in_channels
+        self.bool_channles = 12
+        self.hidden_dim = 64
+        self.dist_head_vae = DistHeadVAE(
+            image_feat_dim=in_channels,
+            transformer_hidden_dim=transformer_hidden_dim,
+            hidden_dim=self.hidden_dim
+        )
+        self.storm_transformer = StochasticTransformerKVCache_small(
+            input_dim=self.hidden_dim,
+            feat_dim=transformer_hidden_dim,
+            num_layers=transformer_num_layers,
+            num_heads=transformer_num_heads,
+            max_length=transformer_max_length,
+            dropout=0.0
+        )
+        self.obs_head = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.mlp_hidden_size),
+            nn.ReLU()
+        )
+        self.bool_head = nn.Linear(self.mlp_hidden_size, self.bool_channles)
+        self.float_head = nn.Linear(self.mlp_hidden_size, 2*(decoder_out_channels - self.bool_channles))
+        self.mse_loss = MSELoss()
+        self.logcosh_loss = log_cosh_loss()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
+        self.kl_div_loss = KLDivLoss(free_bits = 1.0)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3,weight_decay=1e-5)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1500, gamma=0.1)
+
+    def calc_last_dist_feat(self, latent, action):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            temporal_mask = get_subsequent_mask(latent)
+            dist_feat = self.storm_transformer(latent, action, temporal_mask)
+            last_dist_feat = dist_feat[:, -1:]
+            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(last_dist_feat)
+            prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
+            # prior_flattened_sample = self.flatten_sample(prior_sample)
+        return prior_flattened_sample, last_dist_feat
+    def reparameterize(self, mu, log_var):
+        # Compute the standard deviation from the log variance
+        std = torch.exp(0.5 * log_var) + 1e-6
+        # Generate random noise using the same shape as std
+        q = Normal(mu, std)
+        # Return the reparameterized sample
+        return q.rsample()
+    
+    def predict_next(self, sample):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            trans_feat = self.storm_transformer.forward_with_kv_cache(sample)# transformer features
+            obs_hat = self.obs_head(trans_feat)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
+            obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
+        return obs_hat, trans_feat
+    
+    def predict_next_without_kv_cache(self, sample, mask):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            trans_feat = self.storm_transformer.forward(sample, mask) # transformer features
+            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(trans_feat)
+            prior_sample = self.reparameterize(mu_prior, var_prior)
+            obs_hat = self.obs_head(prior_sample) # obs_hat: (batch, 1, input_dim)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
+            obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
+        return obs_hat, trans_feat, prior_sample
+
+    def reparameterize(self, mu, log_var):
+        # Compute the standard deviation from the log variance
+        std = torch.exp(0.5 * log_var) + 1e-6
+        # Generate random noise using the same shape as std
+        q = Normal(mu, std)
+        # Return the reparameterized sample
+        return q.rsample()
+    
+    def compute_torques(self, actions, dof_pos_diff, dof_vel):
+        actions_scaled = actions * 0.25
+        # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
+        # dof_vel = obs[21:33]/obs_scales.dof_vel
+        dof_pos_diff = dof_pos_diff / 1.0
+        dof_vel = dof_vel / 0.05
+        torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
+        return torques
+
+    def flatten_sample(self, sample):
+        return rearrange(sample, "B L K C -> B L (K C)")
+
+    def setup_imagination_train(self, batch_size, sample_obs, batch_length):
+        # if start to step using imagination, initialize the buffer and reset kv_cache
+        self.storm_transformer.reset_kv_cache_list(batch_size, dtype=self.tensor_dtype)
+        self.storm_transformer.eval()
+        batch_size, batch_length = sample_obs.shape[:2]
+        # =====aggregate the kv_cache=====
+        # context
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, device=sample_obs.device)
+            trans_feat = self.storm_transformer.forward_context(sample_obs, temporal_mask)
+            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(trans_feat)
+            prior_sample = self.reparameterize(mu_prior, var_prior)
+            obs_hat = self.obs_head(prior_sample) # obs_hat: (batch, 1, input_dim)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
+            obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
+
+        return obs_hat[:, -1:,:], trans_feat[:, -1:,:]
+
+    def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
+        self.train()
+        batch_size, batch_length = obs.shape[:2]
+        # modify the obs to not include command and actions
+        # which is obs[:, :, 9:12] and obs[:, :, 36:48]
+        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
+        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            mu_post, var_post = self.dist_head_vae.forward_post_vae(critic_obs[:,:,:45])
+            sample = self.reparameterize(mu_post, var_post)
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, obs.device)
+            # get transformer features
+            obs_hat, trans_feat, prior_sample = self.predict_next_without_kv_cache(sample,temporal_mask)
+
+            # env loss
+            # reconstruction_loss for continuous states
+            reconstruction_loss = self.mse_loss(obs_hat[:,:-1,:45], critic_obs[:,1:,:45])
+            # reconstruction_loss for contact states
+            reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:-1,45:], critic_obs[:,1:,45:])
+            # reconstruction_loss for latent states
+            reconstruction_loss_latent = self.mse_loss(prior_sample[:,:-1,: ], sample[:,1:,:])
+            reconstruction_loss = reconstruction_loss + reconstruction_loss_contact + reconstruction_loss_latent
+            
+            # dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(mu_post[:,1:,:].detach(), var_post[:,1:,:].detach(), mu_prior[:,:-1,:], var_prior[:,:-1,:])
+            # representation_loss, representation_real_kl_div = self.kl_div_loss(mu_post[:,1:,:], var_post[:,1:,:], mu_prior[:,:-1,:].detach(), var_prior[:,:-1,:].detach())
+
+            total_loss = reconstruction_loss
+
+        # gradient descent
+        self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)  # for clip grad
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        observation_difference = torch.abs(obs_hat - critic_obs)
+        observation_difference = torch.flatten(observation_difference,0,1).mean(dim=0)
+        base_vel_diff = observation_difference[0:3].mean()
+        angle_diff = observation_difference[3:6].mean()
+        projected_diff = observation_difference[6:9].mean()
+        dof_pos_diff = observation_difference[9:21].mean()
+        dof_vel_diff = observation_difference[21:33].mean()
+
+        if writer is not None and it > 0:
+            self.scheduler.step()
+            writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
+            # writer.add_scalar("WorldModel/real_kl_loss", real_kl_loss.item(), it)
+            writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
+            writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
+            writer.add_scalar("obs_diff/angle_diff", angle_diff.item(), it)
+            writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
+        if return_loss:
+            return reconstruction_loss
+    
+    def update_autoregressive(self, obs, critic_obs, action, context_length, pred_length, it, writer: SummaryWriter):
+        self.train()
+        batch_size, batch_length = obs.shape[:2]
+        context_length = 32
+        prediction_horizon = 8
+        total_loss = 0
+        obs_hats = []
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            mu_post, var_post = self.dist_head_vae.forward_post_vae(critic_obs[:,:,:45])
+            samples = self.reparameterize(mu_post, var_post)
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, obs.device)
+            # get transformer features
+            obs_hat, trans_feat_full, prior_samples_full = self.predict_next_without_kv_cache(samples,temporal_mask)
+
+            alpha = 1.0
+            # get the context input for the autoregressive model
+            obs_inputs = critic_obs[:,:32,:45]
+            for i in range(prediction_horizon):
+                mu_post, var_post = self.dist_head_vae.forward_post_vae(obs_inputs)
+                samples = self.reparameterize(mu_post, var_post)
+                temporal_mask = get_subsequent_mask_with_batch_length(context_length+i, obs.device)
+                obs_hat, trans_feat, prior_sample = self.predict_next_without_kv_cache(samples,temporal_mask)
+                torques = self.compute_torques(action[:, 32+i:32+i+1, :], obs_hat[:, -1:, 9:21], obs_hat[:, -1:, 21:33])
+                obs_hat_for_input = torch.cat([obs_hat[:, -1:, :33],       # First 9 elements of pred_obs
+                                     torques,   # Remaining elements of pred_obs (from index 9 to 32)
+                                    ], dim=-1)
+                obs_inputs = torch.cat([obs_inputs, obs_hat_for_input], dim=1)
+                obs_hats.append(obs_hat[:,-1:,:])
+                # loss for continuous states
+                total_loss += alpha**i * self.mse_loss(obs_hat[:,-1:,:45], critic_obs[:,32+i:32+i+1,:45])
+                # loss for contact states
+                total_loss += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,-1:,45:], critic_obs[:,32+i:32+i+1,45:])
+                # loss for latent states
+                total_loss += alpha**i * self.mse_loss(prior_sample[:,-1:,:],prior_samples_full[:,32+i:32+i+1,:])
+                # total_loss += alpha**i * self.mse_loss(trans_feat, trans_feat_full[:,33+i:33+i+1,:].detach())
+                # loss for kl divergence
+                # total_loss += alpha**i * self.kl_div_loss(mu_post[:,1:,:], var_post[:,1:,:], mu_prior[:,:-1,:].detach(), var_prior[:,:-1,:].detach())[0]
+
+
+
+        # gradient descent
+        self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)  # for clip grad
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        obs_hats = torch.cat(obs_hats, dim=1)
+        observation_difference = torch.abs(obs_hats - critic_obs[:,-8:,:])
+        observation_difference = torch.flatten(observation_difference,0,1).mean(dim=0)
+        base_vel_diff = observation_difference[0:3].mean()
+        angle_diff = observation_difference[3:6].mean()
+        projected_diff = observation_difference[6:9].mean()
+        dof_pos_diff = observation_difference[9:21].mean()
+        dof_vel_diff = observation_difference[21:33].mean()
+
+        if writer is not None and it > 0:
+            self.scheduler.step()
+            # writer.add_scalar("autoregresser/reconstruction_loss", reconstruction_loss.item(), it)
+            # writer.add_scalar("autoregresser/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
+            writer.add_scalar("autoregresser/total_loss", total_loss.item(), it)
+            writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
+            writer.add_scalar("obs_diff/angle_diff", angle_diff.item(), it)
+            writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
+

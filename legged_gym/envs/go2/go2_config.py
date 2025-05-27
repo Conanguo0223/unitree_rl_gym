@@ -241,10 +241,12 @@ class GO2RoughCfgTWM_val( LeggedRobotCfg ):
         num_privileged_obs = 57
     class domain_rand( LeggedRobotCfg.domain_rand ):
         randomize_friction = True
-        friction_range = [1.0, 1.0] # friction in joint
+        friction_range = [2.0, 2.0]
+        randomize_restitution = True
+        restitutions_range = [0.0, 0.0]
         randomize_base_mass = True
-        added_mass_range = [0.0, 0.0]
-        push_robots = False
+        added_mass_range = [2., 2.]
+        push_robots = True
         push_interval_s = 15
         max_push_vel_xy = 1.
     
@@ -278,10 +280,10 @@ class GO2RoughCfgPPOTWM_val( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 64
-        twm_num_layers = 4
-        twm_num_heads = 8
-        twm_train_steps = 2 # train the transformer per this many steps
+        twm_hidden_dim = 128
+        twm_num_layers = 2
+        twm_num_heads = 1
+        twm_train_steps = 1 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
         twm_start_train_policy_steps = 0 # start training the policy using dynamics after this many steps
         twm_train_policy_steps = 2 # train the policy using dynamics per this many steps
@@ -301,12 +303,12 @@ class GO2RoughCfgPPOTWM_val( LeggedRobotCfgPPO):
         #     entropyCoef = 3E-4
         #     use_context = False
     class buffer():
-        max_len = 10000
+        max_len = 100000
         BufferWarmUp = 128
         ReplayBufferOnGPU = True
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        num_steps_per_env = 24 # per iteration
+        num_steps_per_env = 96 # per iteration
         experiment_name = 'rough_go2_TWM_val'
         max_iterations = 300
 ### ======= TWM training =======
@@ -399,8 +401,8 @@ class GO2RoughCfgPPOTWM_train( LeggedRobotCfgPPO):
         
     class twm():
         twm_max_len = 40
-        twm_hidden_dim = 64
-        twm_num_layers = 4
+        twm_hidden_dim = 128
+        twm_num_layers = 2
         twm_num_heads = 1
         twm_train_steps = 1 # train the transformer per this many steps
         twm_start_train_steps = 0 # start training the transformer after this many steps
