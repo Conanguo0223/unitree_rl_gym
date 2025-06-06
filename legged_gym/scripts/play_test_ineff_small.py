@@ -7,7 +7,7 @@ from legged_gym import LEGGED_GYM_ROOT_DIR
 import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
-from rsl_rl.modules.sub_models.world_models import WorldModel_normal_small, WorldModel, WorldModel_normal
+from rsl_rl.modules.sub_models.world_models import WorldModel_normal_small, WorldModel
 import numpy as np
 import torch
 from rsl_rl.modules.sub_models.attention_blocks import get_subsequent_mask_with_batch_length
@@ -22,16 +22,6 @@ def pd_control(actions, dof_pos_diff, dof_vel):
     torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
     return torques
 
-def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
-    return WorldModel_normal(
-        in_channels=in_channels,
-        decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
-        action_dim=action_dim,
-        transformer_max_length = twm_cfg.twm_max_len,
-        transformer_hidden_dim = twm_cfg.twm_hidden_dim,
-        transformer_num_layers = twm_cfg.twm_num_layers,
-        transformer_num_heads = twm_cfg.twm_num_heads
-    ).cuda()
 def build_world_model(in_channels, action_dim, twm_cfg,privileged_dim):
     return WorldModel(
         in_channels=in_channels,
@@ -43,15 +33,15 @@ def build_world_model(in_channels, action_dim, twm_cfg,privileged_dim):
         transformer_num_heads = twm_cfg.twm_num_heads
     ).cuda()
 
-def build_world_model_normal_small(in_channels, action_dim, twm_cfg,privileged_dim):
+def build_world_model_normal_small(in_channels, wm_cfg, privileged_dim):
     return WorldModel_normal_small(
         in_channels=in_channels,
         decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
-        action_dim=action_dim,
-        transformer_max_length = twm_cfg.twm_max_len,
-        transformer_hidden_dim = twm_cfg.twm_hidden_dim,
-        transformer_num_layers = twm_cfg.twm_num_layers,
-        transformer_num_heads = twm_cfg.twm_num_heads
+        transformer_max_length = wm_cfg.max_length,
+        transformer_hidden_dim = wm_cfg.twm_hidden_dim,
+        transformer_num_layers = wm_cfg.twm_num_layers,
+        transformer_num_heads = wm_cfg.twm_num_heads,
+        lr = wm_cfg.learning_rate,
     ).cuda()
 
 def play(args):
@@ -69,20 +59,21 @@ def play(args):
     env_cfg.commands.ranges.ang_vel_yaw = [0.0,0.0]
     env_cfg.commands.ranges.heading = [0.0,0.0]
     env_cfg.env.test = True
-    twm_cfg = train_cfg.twm
+    wm_cfg = train_cfg.WM_params
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
+    train_cfg.runner.load_baseline = True
     ppo_runner, train_cfg, train_cfg_dict, log_dir = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
     num_bool_states = 12
     # build and load world model
     # worldmodel = build_world_model_normal(env.num_obs, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel = build_world_model_normal_small(env.num_privileged_obs - num_bool_states, env.num_actions,twm_cfg, privileged_dim = env.num_privileged_obs)
-    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_23-25-41_/world_model_4700.pt"))
+    worldmodel = build_world_model_normal_small(env.num_privileged_obs - num_bool_states, wm_cfg, privileged_dim = env.num_privileged_obs)
+    worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_23-25-41_/world_model_4999.pt"))
     # export policy as a jit module (used to run it from C++)
     
     if EXPORT_POLICY:
@@ -111,7 +102,7 @@ def play(args):
         dones_list.append(dones)
         privilege_obs_list.append(privilege_obs)
 
-    batch_length = twm_cfg.batch_length # context length
+    batch_length = wm_cfg.context_len # context length
     start_episode = 50
     imagine_horizon = max_episode_length - start_episode - batch_length
     obs_sample = torch.stack(obs_list, dim=1) # [env_num, episode_length, obs_dim]
@@ -123,6 +114,7 @@ def play(args):
     obs_sample_for_compare = privilege_obs_sample[:, :start_episode+batch_length]
     obs_sample_for_inference = privilege_obs_sample[:,:start_episode+batch_length,:45]
     dreaming_batch_length = 8
+    attns = None
     with torch.inference_mode():
         worldmodel.eval()
         # get the cmd_tensor to retrieve the full observation        
@@ -135,7 +127,7 @@ def play(args):
             obs_inference = obs_sample_for_inference[:,-batch_length:,:]
             for i in range(dreaming_batch_length):
                 temporal_mask = get_subsequent_mask_with_batch_length(batch_length+i, obs.device)
-                obs_hat, trans_feat = worldmodel.predict_next_without_kv_cache(obs_inference,temporal_mask)
+                obs_hat, trans_feat, attns = worldmodel.predict_next_without_kv_cache_with_attention(obs_inference,temporal_mask)
                 action_sample_current = action_sample[:,start_episode+batch_length+dreaming_batch_length*(imag_step)+i+2:start_episode+batch_length+dreaming_batch_length*(imag_step)+3+i,:]
                 torques = pd_control(action_sample_current, obs_hat[:, -1:, 9:21], obs_hat[:, -1:, 21:33])
                 obs_hat_inf = torch.cat([obs_hat[:, -1:, :33],       # First 9 elements of pred_obs
@@ -144,10 +136,10 @@ def play(args):
                 obs_inference = torch.cat((obs_inference, obs_hat_inf),dim=1)
                 obs_sample_for_inference = torch.cat((obs_sample_for_inference, obs_hat_inf),dim=1)
                 obs_sample_for_compare = torch.cat((obs_sample_for_compare, obs_hat[:,-1:,:]),dim=1)
-            
+                
             # imag_step += 8
  
-    
+    np.save("attentions", attns.cpu().numpy())
     print("obs_sample_for_compare shape: ", obs_sample_for_compare.shape)
     np.save("obs_sample_np", privilege_obs_sample.squeeze().cpu().numpy())
     np.save("obs_hat_np", obs_sample_for_compare.squeeze().cpu().numpy())

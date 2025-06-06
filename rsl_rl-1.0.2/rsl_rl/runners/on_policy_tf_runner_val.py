@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal, WorldModel_normal_small
+from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal_small
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq, ReplayBuffer_seq_new
@@ -77,18 +77,16 @@ def build_world_model_normal(in_channels, action_dim, twm_cfg,privileged_dim):
         transformer_num_heads = twm_cfg["twm_num_heads"]
     ).cuda()
 
-def build_world_model_normal_small(in_channels, action_dim, twm_cfg,privileged_dim):
+def build_world_model_normal_small(in_channels, wm_cfg, privileged_dim):
     return WorldModel_normal_small(
         in_channels=in_channels,
         decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
-        action_dim=action_dim,
-        transformer_max_length = twm_cfg["twm_max_len"],
-        transformer_hidden_dim = twm_cfg["twm_hidden_dim"],
-        transformer_num_layers = twm_cfg["twm_num_layers"],
-        transformer_num_heads = twm_cfg["twm_num_heads"],
-        lr = 1e-4
+        transformer_max_length = wm_cfg["max_length"],
+        transformer_hidden_dim = wm_cfg["twm_hidden_dim"],
+        transformer_num_layers = wm_cfg["twm_num_layers"],
+        transformer_num_heads = wm_cfg["twm_num_heads"],
+        lr = wm_cfg["learning_rate"],
     ).cuda()
-
 def obs2reward(env, obs, cmds,actions):
     # self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
     #                             self.base_ang_vel  * self.obs_scales.ang_vel,
@@ -157,7 +155,9 @@ class OnPolicy_WM_Runner_Val:
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         self.rply_buff = train_cfg["buffer"]
-        self.twm_cfg = train_cfg["twm"]
+        self.wm_cfg = train_cfg["WM_params"]
+        self.wm_training = train_cfg["wm_training"]
+        self.img_policy_training = train_cfg["img_policy_training"]
         self.device = device
         self.env = env
         if self.env.num_privileged_obs is not None:
@@ -167,7 +167,7 @@ class OnPolicy_WM_Runner_Val:
             self.num_critic_obs = self.env.num_obs
         self.num_critic_obs = self.env.num_obs
         self.num_bool_states = 12
-        self.worldmodel = build_world_model_normal_small(self.env.num_privileged_obs - self.num_bool_states, self.env.num_actions, self.twm_cfg, privileged_dim = self.env.num_privileged_obs)
+        self.worldmodel = build_world_model_normal_small(self.env.num_privileged_obs - self.num_bool_states, self.wm_cfg, privileged_dim = self.env.num_privileged_obs)
         # self.agent = build_agent(self.alg_cfg, self.env.num_actions)
 
         # build Actor critic class
@@ -180,7 +180,7 @@ class OnPolicy_WM_Runner_Val:
         load_policy_model = True
 
         if load_world_model:
-            self.worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_23-25-41_/world_model_4999.pt"))
+            self.worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_23-25-41_/world_model_4700.pt"))
             print("loaded pretrained world")
         if load_policy_model:
             actor_critic.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2/baseline_policy/model_5000.pt")["model_state_dict"])
@@ -191,7 +191,7 @@ class OnPolicy_WM_Runner_Val:
 
         # bigger replay buffer for the world model
         self.num_steps_per_env = self.cfg["num_steps_per_env"] # 40, this is also the context length
-        self.imagination_horizon = self.policy_cfg["imagination_horizon"]
+        # self.imagination_horizon = self.policy_cfg["imagination_horizon"]
         self.save_interval = self.cfg["save_interval"] 
         self.replay_buffer = ReplayBuffer_seq_new(
             obs_shape = (self.env.num_obs,),
@@ -208,17 +208,11 @@ class OnPolicy_WM_Runner_Val:
         
 
         # world model training parameters
-        self.train_dynamics_steps = self.twm_cfg["twm_train_steps"]
-        self.start_train_dynamics_steps = self.twm_cfg["twm_start_train_steps"]
-        self.start_train_using_dynamics_steps = self.twm_cfg["twm_start_train_policy_steps"]
-        self.train_tw_policy_steps = self.twm_cfg["twm_train_policy_steps"]
-        self.dreaming_batch_size = self.twm_cfg["dreaming_batch_size"]
-        self.batch_length = self.twm_cfg["batch_length"]
-        self.twm_max_len = self.twm_cfg["twm_max_len"]
-        self.demonstration_batch_size = self.twm_cfg["demonstration_batch_size"]
-        self.train_agent_steps = self.twm_cfg["train_agent_steps"]
-        self.train_tokenizer_times = self.twm_cfg["train_tokenizer_times"]
-        self.train_dynamics_times = self.twm_cfg["train_dynamic_times"]
+        self.train_dynamics_steps = self.wm_training["wm_train_steps"]
+        self.start_train_dynamics_steps = self.wm_training["wm_start_train_steps"]
+        self.dreaming_batch_size = self.wm_training["wm_batch_size"]
+        self.twm_max_len = self.wm_cfg["max_length"]
+        self.train_dynamics_times = self.wm_training["train_wm_times"]
         # init storage and model for the policy
         num_step_for_ppo = 24
         self.alg.init_storage_dream(self.env.num_envs, num_step_for_ppo, [self.env.num_obs], [self.env.num_obs], [self.env.num_actions], self.dreaming_batch_size)

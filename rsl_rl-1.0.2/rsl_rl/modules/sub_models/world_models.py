@@ -6,6 +6,7 @@ from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange
 from torch.cuda.amp import autocast
 from torch.utils.tensorboard import SummaryWriter
+
 import math
 from .functions_losses import SymLogTwoHotLoss
 from .attention_blocks import get_subsequent_mask_with_batch_length, get_subsequent_mask
@@ -13,10 +14,19 @@ from .transformer_model import StochasticTransformerKVCache, StochasticTransform
 from .agents import ActorCriticAgent
 
 
+def compute_torques(actions, dof_pos_diff, dof_vel):
+    actions_scaled = actions * 0.25
+    # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
+    # dof_vel = obs[21:33]/obs_scales.dof_vel
+    dof_pos_diff = dof_pos_diff / 1.0
+    dof_vel = dof_vel / 0.05
+    torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
+    return torques
+
 class EncoderBN(nn.Module):
-    def __init__(self, in_features, stem_channels, feature_depth) -> None:
+    def __init__(self, in_features, stem_features, latent_feature) -> None:
         super().__init__()
-        # stem_channels = 32
+        # stem_channels = 64
         # final_feature_layers = 4
         # self.type = "conv"
         self.type = "linear"
@@ -26,7 +36,7 @@ class EncoderBN(nn.Module):
             backbone.append(
                 nn.Linear(
                     in_features= in_features, 
-                    out_features=stem_channels,
+                    out_features=stem_features,
                     bias=False
                 )
         )
@@ -34,16 +44,16 @@ class EncoderBN(nn.Module):
             backbone.append(
                 nn.Conv1d(
                     in_channels=in_features,
-                    out_channels=stem_channels,
+                    out_channels=stem_features,
                     kernel_size=4,
                     stride=2,
                     padding=1,
                     bias=False
                 )
             )
-        feature_layers = feature_depth
-        channels = stem_channels
-        backbone.append(nn.BatchNorm1d(stem_channels))
+        feature_layers = math.ceil(math.log2(stem_features/latent_feature))# 1:64 #2:128 #3:256
+        features = stem_features
+        backbone.append(nn.BatchNorm1d(stem_features))
         backbone.append(nn.ReLU(inplace=True))
 
         # layers
@@ -51,32 +61,35 @@ class EncoderBN(nn.Module):
             if self.type == "linear":
                 backbone.append(
                     nn.Linear(
-                        in_features=channels,
-                        out_features=channels*2,
+                        in_features=features,
+                        out_features=features//2,
+                        # out_features=channels*2,
                         bias=False
                     )
                 )
             if self.type == "conv":
                 backbone.append(
                     nn.Conv1d(
-                        in_channels=channels,
-                        out_channels=channels*2,
+                        in_channels=features,
+                        out_channels=features*2,
                         kernel_size=4,
                         stride=2,
                         padding=1,
                         bias=False
                     )
                 )
-            channels *= 2
+            features /= 2
+            features = int(features)
+            # channels *=2
             feature_layers -= 1
-            backbone.append(nn.BatchNorm1d(channels))
+            backbone.append(nn.BatchNorm1d(features))
             backbone.append(nn.ReLU(inplace=True))
 
             if feature_layers == 0:
                 break
 
         self.backbone = nn.Sequential(*backbone)
-        self.last_channels = channels
+        self.last_features = features
 
     def forward(self, x):
         batch_size = x.shape[0]
@@ -85,124 +98,50 @@ class EncoderBN(nn.Module):
         x = rearrange(x, "(B T) F -> B T F", B=batch_size)
         return x
 
-class VectorQuantizer(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, commitment_cost):
-        """
-        Vector Quantizer for VQ-VAE.
-
-        Args:
-            num_embeddings (int): Number of embedding vectors in the codebook.
-            embedding_dim (int): Dimensionality of each embedding vector.
-            commitment_cost (float): Weight for the commitment loss.
-        """
-        super(VectorQuantizer, self).__init__()
-        self.num_embeddings = num_embeddings
-        self.embedding_dim = embedding_dim
-        self.commitment_cost = commitment_cost
-
-        # Initialize the embedding table
-        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1 / num_embeddings, 1 / num_embeddings)
-
-    def forward(self, inputs):
-        """
-        Forward pass for vector quantization.
-
-        Args:
-            inputs (torch.Tensor): Input tensor of shape (batch_size, embedding_dim, ...).
-
-        Returns:
-            quantized (torch.Tensor): Quantized tensor of the same shape as inputs.
-            loss (torch.Tensor): Commitment loss.
-            indices (torch.Tensor): Indices of the closest embeddings.
-        """
-        # Flatten input to (batch_size * ..., embedding_dim)
-        flat_inputs = inputs.view(-1, self.embedding_dim)
-
-        # Compute distances to embedding vectors
-        distances = (
-            (flat_inputs ** 2).sum(dim=1, keepdim=True)
-            - 2 * torch.matmul(flat_inputs, self.embedding.weight.T)
-            + (self.embedding.weight ** 2).sum(dim=1)
-        )
-
-        # Find the closest embedding for each input
-        indices = torch.argmin(distances, dim=1)
-        quantized = self.embedding(indices).view_as(inputs)
-
-        # Compute commitment loss
-        e_latent_loss = F.mse_loss(quantized.detach(), inputs)
-        q_latent_loss = F.mse_loss(quantized, inputs.detach())
-        loss = q_latent_loss + self.commitment_cost * e_latent_loss
-
-        # Straight-through gradient estimator
-        quantized = inputs + (quantized - inputs).detach()
-
-        return quantized, loss, indices
-
 class DecoderBN(nn.Module):
-    def __init__(self, stoch_dim, last_channels, original_in_channels, stem_channels, feature_depth, out_bool=False) -> None:
+    def __init__(self, latent_dim, head_feature, output_features, stem_channels) -> None:
         super().__init__()
         self.type = "linear"
         # self.type = "conv"
         backbone = []
         # stem
-        backbone.append(nn.Linear(stoch_dim, last_channels, bias=False))
-        backbone.append(Rearrange('B L F -> (B L) F', F=last_channels))
-        backbone.append(nn.BatchNorm1d(last_channels))
+        backbone.append(nn.Linear(latent_dim, head_feature, bias=False))
+        backbone.append(Rearrange('B L F -> (B L) F', F=head_feature))
+        backbone.append(nn.BatchNorm1d(head_feature))
         backbone.append(nn.ReLU(inplace=True))
-        # residual_layer
-        # backbone.append(ResidualStack(last_channels, 1, last_channels//4))
+        
+
         # layers
-        channels = last_channels
-        feat_width = feature_depth
+        features = head_feature
         while True:
-            if channels == stem_channels:
+            if features == stem_channels:
                 break
             if self.type == "linear":
                 backbone.append(
                     nn.Linear(
-                        in_features=channels,
-                        out_features=channels//2,
+                        in_features=features,
+                        out_features=features*2,
                         bias=False
                     )
                 )
             if self.type == "conv":
                 backbone.append(
                     nn.ConvTranspose1d(
-                        in_channels=channels,
-                        out_channels=channels//2,
+                        in_channels=features,
+                        out_channels=features//2,
                         kernel_size=4,
                         stride=2,
                         padding=1,
                         bias=False
                     )
                 )
-            channels //= 2
-            feat_width *= 2
-            backbone.append(nn.BatchNorm1d(channels))
+            features *= 2
+            backbone.append(nn.BatchNorm1d(features))
             backbone.append(nn.ReLU(inplace=True))
-        # if self.type == "linear":
-        #     backbone.append(
-        #         nn.Linear(
-        #             in_features=channels,
-        #             out_features=original_in_channels,
-        #             bias=False
-        #         )
-        #     )
-        # if self.type == "conv":
-        #     backbone.append(
-        #         nn.ConvTranspose1d(
-        #             in_channels=channels,
-        #             out_channels=original_in_channels,
-        #             kernel_size=4,
-        #             stride=2,
-        #             padding=1
-        #         )
-        #     )
-        bool_channels = 12
-        self.float_head = nn.Linear(channels, original_in_channels-bool_channels)
-        self.bool_head = nn.Linear(channels, bool_channels)
+        # add final layer for boolean and float output
+        bool_channels = 4
+        self.float_head = nn.Linear(features, output_features-bool_channels)
+        self.bool_head = nn.Linear(features, bool_channels)
         self.backbone = nn.Sequential(*backbone)
 
     def forward(self, sample):
@@ -217,15 +156,15 @@ class DecoderBN(nn.Module):
         return obs_hat
 
 
-class DistHead(nn.Module):
+class DistHead_stoch(nn.Module):
     '''
     Dist: abbreviation of distribution
     '''
-    def __init__(self, image_feat_dim, transformer_hidden_dim, stoch_dim) -> None:
+    def __init__(self, in_feat_dim, transformer_hidden_dim, stoch_dim) -> None:
         super().__init__()
         self.stoch_dim = stoch_dim
-        self.post_head = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
-        self.prior_head = nn.Linear(transformer_hidden_dim, stoch_dim*stoch_dim)
+        self.post_head = nn.Linear(in_feat_dim, stoch_dim)
+        self.prior_head = nn.Linear(transformer_hidden_dim, stoch_dim)
 
     def unimix(self, logits, mixing_ratio=0.01):
         # uniform noise mixing
@@ -236,13 +175,13 @@ class DistHead(nn.Module):
 
     def forward_post(self, x):
         logits = self.post_head(x)
-        logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
+        # logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
         logits = self.unimix(logits)
         return logits
 
     def forward_prior(self, x):
         logits = self.prior_head(x)
-        logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
+        # logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
         logits = self.unimix(logits)
         return logits
     
@@ -250,15 +189,14 @@ class DistHeadVAE(nn.Module):
     '''
     Dist: abbreviation of distribution for VAE
     '''
-    def __init__(self, image_feat_dim, transformer_hidden_dim, hidden_dim) -> None:
+    def __init__(self, in_feat_dim, transformer_hidden_dim, hidden_dim) -> None:
         super().__init__()
         # TODO: add init_noise_std?
         self.stoch_dim = hidden_dim
-        # self.post_head = nn.Linear(image_feat_dim, stoch_dim*stoch_dim)
-        # self.prior_head = nn.Linear(transformer_hidden_dim, stoch_dim*stoch_dim)
-        self.mu_in = nn.Linear(image_feat_dim, self.stoch_dim)
-        self.log_var_in = nn.Linear(image_feat_dim, self.stoch_dim)
-
+        # post
+        self.mu_in = nn.Linear(in_feat_dim, self.stoch_dim)
+        self.log_var_in = nn.Linear(in_feat_dim, self.stoch_dim)
+        # prior
         self.mu_out = nn.Linear(transformer_hidden_dim, self.stoch_dim)
         self.log_var_out = nn.Linear(transformer_hidden_dim, self.stoch_dim)
         # Initialize weights and biases
@@ -289,24 +227,16 @@ class DistHeadVAE(nn.Module):
     def forward_post_vae(self, x):
         mu_in = self.mu_in(x)
         log_var_in = self.log_var_in(x)
-        # log_var_in = rearrange(log_var_in, "B L (K C) -> B L K C", K=self.stoch_dim)
-        # mu_in = rearrange(mu_in, "B L (K C) -> B L K C", K=self.stoch_dim)
-        # logits = self.unimix(logits)
         return mu_in, log_var_in
 
     def forward_prior_vae(self, x):
         mu_out = self.mu_out(x)
         log_var_out = self.log_var_out(x)
-        # log_var_out = rearrange(log_var_out, "B L (K C) -> B L K C", K=self.stoch_dim)
-        # mu_out = rearrange(mu_out, "B L (K C) -> B L K C", K=self.stoch_dim)
-        # logits = self.prior_head(x)
-        # logits = rearrange(logits, "B L (K C) -> B L K C", K=self.stoch_dim)
-        # logits = self.unimix(logits)
         return mu_out, log_var_out
 
 
 class RewardDecoder(nn.Module):
-    def __init__(self, num_classes, embedding_size, transformer_hidden_dim) -> None:
+    def __init__(self, num_classes, transformer_hidden_dim) -> None:
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Linear(transformer_hidden_dim, transformer_hidden_dim, bias=False),
@@ -327,7 +257,7 @@ class RewardDecoder(nn.Module):
 
 
 class TerminationDecoder(nn.Module):
-    def __init__(self,  embedding_size, transformer_hidden_dim) -> None:
+    def __init__(self, transformer_hidden_dim) -> None:
         super().__init__()
         self.backbone = nn.Sequential(
             nn.Linear(transformer_hidden_dim, transformer_hidden_dim, bias=False),
@@ -339,7 +269,7 @@ class TerminationDecoder(nn.Module):
         )
         self.head = nn.Sequential(
             nn.Linear(transformer_hidden_dim, 1),
-            # nn.Sigmoid()
+            nn.Sigmoid()
         )
 
     def forward(self, feat):
@@ -357,14 +287,7 @@ class MSELoss(nn.Module):
         loss = (obs_hat - obs)**2
         loss = reduce(loss, "B L F -> B L", "sum")
         return loss.mean()
-class MSELoss_GRU_hid(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, obs_hat, obs):
-        loss = (obs_hat - obs)**2
-        loss = reduce(loss, "B L F -> B", "sum")
-        return loss.mean()
+    
 class log_cosh_loss(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -373,6 +296,16 @@ class log_cosh_loss(nn.Module):
         loss = torch.log(torch.cosh(obs_hat - obs))
         loss = reduce(loss, "B L F -> B L", "sum")
         return loss.mean()
+    
+class MSELoss_GRU_hid(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, obs_hat, obs):
+        loss = (obs_hat - obs)**2
+        loss = reduce(loss, "B L F -> B", "sum")
+        return loss.mean()
+    
 
 class CategoricalKLDivLossWithFreeBits(nn.Module):
     def __init__(self, free_bits) -> None:
@@ -383,373 +316,13 @@ class CategoricalKLDivLossWithFreeBits(nn.Module):
         p_dist = OneHotCategorical(logits=p_logits)
         q_dist = OneHotCategorical(logits=q_logits)
         kl_div = torch.distributions.kl.kl_divergence(p_dist, q_dist)
-        kl_div = reduce(kl_div, "B L D -> B L", "sum")
+        # kl_div = reduce(kl_div, "B L D -> B L", "sum")
         kl_div = kl_div.mean()
         real_kl_div = kl_div
         kl_div = torch.max(torch.ones_like(kl_div)*self.free_bits, kl_div)
         return kl_div, real_kl_div
 
-
-class WorldModel(nn.Module):
-    def __init__(self, in_channels, decoder_out_channels, action_dim,
-                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
-        super().__init__()
-        self.transformer_hidden_dim = transformer_hidden_dim
-        self.decoder_out_channels = decoder_out_channels
-        self.feature_depth = int(math.log2(transformer_hidden_dim) - 5.0) #1:64 #2:128 #3:256
-        self.stoch_dim = 32
-        self.stoch_flattened_dim = self.stoch_dim*self.stoch_dim
-        self.use_amp = True
-        self.tensor_dtype = torch.bfloat16 if self.use_amp else torch.float32
-        self.imagine_batch_size = -1
-        self.imagine_batch_length = -1
-        self.in_channels = in_channels
-        self.encoder = EncoderBN(
-            in_features=in_channels,
-            stem_channels=32,
-            feature_depth=self.feature_depth
-        )
-        self.storm_transformer = StochasticTransformerKVCache(
-            stoch_dim=self.stoch_flattened_dim,
-            action_dim=action_dim,
-            feat_dim=transformer_hidden_dim,
-            num_layers=transformer_num_layers,
-            num_heads=transformer_num_heads,
-            max_length=transformer_max_length,
-            dropout=0.1
-        )
-        self.dist_head = DistHead(
-            image_feat_dim=self.encoder.last_channels,
-            transformer_hidden_dim=transformer_hidden_dim,
-            stoch_dim=self.stoch_dim
-        )
-        self.image_decoder = DecoderBN(
-            stoch_dim=self.stoch_flattened_dim,
-            last_channels=self.encoder.last_channels,
-            original_in_channels=decoder_out_channels,
-            stem_channels=32,
-            feature_depth=self.feature_depth
-        )
-        self.reward_decoder = RewardDecoder(
-            num_classes=1,
-            embedding_size=self.stoch_flattened_dim,
-            transformer_hidden_dim=transformer_hidden_dim
-        )
-        self.termination_decoder = TerminationDecoder(
-            embedding_size=self.stoch_flattened_dim,
-            transformer_hidden_dim=transformer_hidden_dim
-        )
-
-        self.mse_loss_func_obs = MSELoss()
-        self.mse_loss = nn.MSELoss(reduction='sum')
-        self.ce_loss = nn.CrossEntropyLoss()
-        self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
-        # self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
-        self.categorical_kl_div_loss = CategoricalKLDivLossWithFreeBits(free_bits=1)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
-
-    def encode_obs(self, obs):
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            embedding = self.encoder(obs)
-            post_logits = self.dist_head.forward_post(embedding)
-            sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
-            flattened_sample = self.flatten_sample(sample)
-        return flattened_sample
-
-    def calc_last_dist_feat(self, latent, action):
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            temporal_mask = get_subsequent_mask(latent)
-            dist_feat = self.storm_transformer(latent, action, temporal_mask)
-            last_dist_feat = dist_feat[:, -1:]
-            prior_logits = self.dist_head.forward_prior(last_dist_feat)
-            prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
-            prior_flattened_sample = self.flatten_sample(prior_sample)
-        return prior_flattened_sample, last_dist_feat
-
-    def predict_next(self, last_flattened_sample, action, log_video=True):
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            dist_feat = self.storm_transformer.forward_with_kv_cache(last_flattened_sample, action)# transformer features
-            prior_logits = self.dist_head.forward_prior(dist_feat) # 
-
-            # decoding
-            prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
-            prior_flattened_sample = self.flatten_sample(prior_sample) # the output from transformer to predict the next observation
-            if log_video:
-                obs_hat = self.image_decoder(prior_flattened_sample) # predicted next observation
-            else:
-                obs_hat = None
-            reward_hat = self.reward_decoder(dist_feat)
-            # reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
-            termination_hat = self.termination_decoder(dist_feat)
-            termination_hat = termination_hat > 0
-
-        return obs_hat, reward_hat, termination_hat, prior_flattened_sample, dist_feat
-
-    def stright_throught_gradient(self, logits, sample_mode="random_sample"):
-        dist = OneHotCategorical(logits=logits)
-        # dist = RelaxedOneHotCategorical(logits=logits)
-        if sample_mode == "random_sample":
-            sample = dist.sample() + dist.probs - dist.probs.detach()
-        elif sample_mode == "mode":
-            sample = dist.mode
-        elif sample_mode == "probs":
-            sample = dist.probs
-        return sample
-
-    def flatten_sample(self, sample):
-        return rearrange(sample, "B L K C -> B L (K C)")
-
-    def init_imagine_buffer(self, imagine_batch_size, imagine_batch_length, dtype):
-        '''
-        This can slightly improve the efficiency of imagine_data
-        But may vary across different machines
-        '''
-        if self.imagine_batch_size != imagine_batch_size or self.imagine_batch_length != imagine_batch_length:
-            print(f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}")
-            self.imagine_batch_size = imagine_batch_size
-            self.imagine_batch_length = imagine_batch_length
-            # these three parameters are used to predict the future, so it will have one extra
-            latent_size = (imagine_batch_size, imagine_batch_length+1, self.stoch_flattened_dim)
-            hidden_size = (imagine_batch_size, imagine_batch_length+1, self.transformer_hidden_dim)
-            obs_hat_size = (imagine_batch_size, imagine_batch_length+1, self.decoder_out_channels) # set obs dimension
-            # other parametes are saying information about the current time step
-            action_size = (imagine_batch_size, imagine_batch_length, 12) # set action dimension
-            # scalar_size = (imagine_batch_size, imagine_batch_length)
-            self.obs_hat_buffer = torch.zeros(obs_hat_size, dtype=dtype, device="cuda")
-            self.latent_buffer = torch.zeros(latent_size, dtype=dtype, device="cuda")
-            self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device="cuda")
-            self.action_buffer = torch.zeros(action_size, dtype=dtype, device="cuda")
-
-    def imagine_data(self, agent: ActorCriticAgent, sample_obs, sample_action,
-                     imagine_batch_size, imagine_batch_length, log_video, logger):
-        self.init_imagine_buffer(imagine_batch_size, imagine_batch_length, dtype=self.tensor_dtype)
-        obs_hat_list = []
-
-        self.storm_transformer.reset_kv_cache_list(imagine_batch_size, dtype=self.tensor_dtype)
-        # context
-        context_latent = self.encode_obs(sample_obs)
-        for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
-            last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
-                context_latent[:, i:i+1],
-                sample_action[:, i:i+1],
-                log_video=log_video
-            )
-        self.latent_buffer[:, 0:1] = last_latent
-        self.hidden_buffer[:, 0:1] = last_dist_feat
-
-        # imagine
-        for i in range(imagine_batch_length):
-            action = agent.sample(torch.cat([self.latent_buffer[:, i:i+1], self.hidden_buffer[:, i:i+1]], dim=-1))
-            self.action_buffer[:, i:i+1] = action
-
-            last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
-                self.latent_buffer[:, i:i+1], self.action_buffer[:, i:i+1], log_video=log_video)
-
-            self.latent_buffer[:, i+1:i+2] = last_latent
-            self.hidden_buffer[:, i+1:i+2] = last_dist_feat
-            self.reward_hat_buffer[:, i:i+1] = last_reward_hat
-            self.termination_hat_buffer[:, i:i+1] = last_termination_hat
-            if log_video:
-                obs_hat_list.append(last_obs_hat[::imagine_batch_size//16])  # uniform sample vec_env
-
-        if log_video:
-            logger.log("Imagine/predict_video", torch.clamp(torch.cat(obs_hat_list, dim=1), 0, 1).cpu().float().detach().numpy())
-
-        return torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1), self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
-    
-    def imagine_step(self, batch_size, sample_obs, sample_action, reward_sample, termination_sample, imag_step):
-        # context
-        # uset the encoder to encode the obs
-        context_latent = self.encode_obs(sample_obs[:,-1:,:])
-        
-        last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
-                context_latent[:,-1:,:],
-                sample_action[:, -1:, :],
-                log_video=True
-            )
-        
-        # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1,:]
-        # self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1,:]
-        # self.hidden_buffer[:, 0:1] = dist_feat[:,-1,:]
-        return last_obs_hat, last_obs_hat, last_reward_hat, last_latent
-
-    def setup_imagination(self, batch_size, sample_obs, sample_action, batch_length):
-        # if start to step using imagination, initialize the buffer and reset kv_cache
-        self.init_imagine_buffer(batch_size, batch_length, dtype=self.tensor_dtype)
-        self.storm_transformer.reset_kv_cache_list(batch_size, dtype=self.tensor_dtype)
-        self.storm_transformer.eval()
-        # =====aggregate the kv_cache=====
-        # context
-        context_latent = self.encode_obs(sample_obs)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            temporal_mask = get_subsequent_mask(context_latent)
-            dist_feat = self.storm_transformer.forward_context(context_latent, sample_action, temporal_mask)
-            prior_logits = self.dist_head.forward_prior(dist_feat)
-            prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
-            prior_flattened_sample = self.flatten_sample(prior_sample) 
-            obs_hat = self.image_decoder(prior_flattened_sample)
-            reward_hat = self.reward_decoder(dist_feat)
-            # reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
-            termination_hat = self.termination_decoder(dist_feat)
-            termination_hat = termination_hat > 0
-
-        # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1:,:]
-        self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1:,:]
-        self.hidden_buffer[:, 0:1] = dist_feat[:,-1:,:]
-        # return obs_hat[:, -1:,:], prior_flattened_sample[:,-1:,:], dist_feat[:,-1:,:], sample_action[:,-1:,:]# return the predicted observation, the flattend
-        return obs_hat[:, -1:,:], prior_flattened_sample[:, -1:].unsqueeze(-1), termination_hat[:, -1:].unsqueeze(-1)
-
-    def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
-        self.train()
-        batch_size, batch_length = obs.shape[:2]
-        # modify the obs to not include command and actions
-        # which is obs[:, :, 9:12] and obs[:, :, 36:48]
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # encoding
-            embedding = self.encoder(obs)
-            post_logits = self.dist_head.forward_post(embedding)
-            sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
-            flattened_sample = self.flatten_sample(sample)
-
-            # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
-
-            # transformer
-            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
-            prior_logits = self.dist_head.forward_prior(dist_feat)
-
-            prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
-            flattened_prior_sample = self.flatten_sample(prior_sample)
-            
-            obs_hat_out = self.image_decoder(flattened_prior_sample)
-
-            # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
-            reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs_decoder)
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], critic_obs[:,1:,:])
-            reconstruction_loss_out_contact = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
-            
-            latent_reconstruction_loss = self.mse_loss_func_obs(flattened_sample[:,:-1,:], flattened_prior_sample[:,1:,:])
-            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            # reward_loss = self.mse_loss(reward_hat, reward)
-            # termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
-            # dyn-rep loss
-            dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
-            representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-            total_loss = reconstruction_loss + reconstruction_loss_contact + reconstruction_loss_out + reconstruction_loss_out_contact + latent_reconstruction_loss + dynamics_loss + representation_loss #+ reward_loss + termination_loss
-
-        # gradient descent
-        self.scaler.scale(total_loss).backward()
-        self.scaler.unscale_(self.optimizer)  # for clip grad
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad(set_to_none=True)
-
-        # observation_difference = torch.abs(obs_hat - critic_obs)
-        observation_difference =torch.abs(obs_hat - critic_obs).mean(dim=-1)
-        base_vel_diff = observation_difference[0:3].mean()
-        angle_diff = observation_difference[3:6].mean()
-        projected_diff = observation_difference[6:9].mean()
-        dof_pos_diff = observation_difference[9:21].mean()
-        dof_vel_diff = observation_difference[21:33].mean()
-        # contact_diff = observation_difference[33:37].mean()
-        # command_diff = observation_difference[9:12].mean()
-        # dof_pos_diff = observation_difference[12:24].mean()
-        # dof_vel_diff = observation_difference[24:36].mean()
-        # dof_action_diff = observation_difference[36:48].mean()
-        if writer is not None and it > 0:
-            writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
-            writer.add_scalar("WorldModel/reconstruction_loss_out", reconstruction_loss_out.item(), it)
-            writer.add_scalar("WorldModel/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
-            writer.add_scalar("WorldModel/reconstruction_loss_out_contact", reconstruction_loss_out_contact.item(), it)
-            writer.add_scalar("WorldModel/latent_reconstruction_loss", latent_reconstruction_loss.item(), it)
-            writer.add_scalar("WorldModel/dynamics_loss", dynamics_loss.item(), it)
-            writer.add_scalar("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.item(), it)
-            writer.add_scalar("WorldModel/representation_loss", representation_loss.item(), it)
-            writer.add_scalar("WorldModel/representation_real_kl_div", representation_real_kl_div.item(), it)
-            writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
-            writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
-            writer.add_scalar("obs_diff/angle_diff", angle_diff.item(), it)
-            writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
-            # writer.add_scalar("obs_diff/command_diff", command_diff.item(), it)
-            writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
-            writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
-            # writer.add_scalar("obs_diff/contact_diff", contact_diff.item(), it)
-            # writer.add_scalar("obs_diff/dof_action_diff", dof_action_diff.item(), it)
-        if return_loss:
-            return reconstruction_loss
-    
-    def update_tokenizer(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
-        self.train()
-        batch_size, batch_length = obs.shape[:2]
-        # modify the obs to not include command and actions
-        # which is obs[:, :, 9:12] and obs[:, :, 36:48]
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-        obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # encoding
-            embedding = self.encoder(obs)
-            post_logits = self.dist_head.forward_post(embedding)
-            sample = self.stright_throught_gradient(post_logits, sample_mode="random_sample")
-            flattened_sample = self.flatten_sample(sample)
-
-            # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
-
-            # transformer
-            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
-            prior_logits = self.dist_head.forward_prior(dist_feat)
-
-            prior_sample = self.stright_throught_gradient(prior_logits, sample_mode="random_sample")
-            flattened_prior_sample = self.flatten_sample(prior_sample)
-            
-            obs_hat_out = self.image_decoder(flattened_prior_sample)
-            # decoding reward and termination with dist_feat
-            reward_hat = self.reward_decoder(dist_feat)
-            termination_hat = self.termination_decoder(dist_feat)
-
-            # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
-            reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs_decoder)
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:], critic_obs[:,1:,:])
-            reconstruction_loss_out_contact = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
-            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            # reward_loss = self.mse_loss(reward_hat, reward)
-            # termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
-            latent_reconstruction_loss = self.mse_loss_func_obs(flattened_sample[:,:-1,:], flattened_prior_sample[:,1:,:])
-            total_loss = reconstruction_loss + reconstruction_loss_contact + reconstruction_loss_out + reconstruction_loss_out_contact + latent_reconstruction_loss#  + reward_loss + termination_loss
-            # # dyn-rep loss
-            # dynamics_loss, dynamics_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
-            # representation_loss, representation_real_kl_div = self.categorical_kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
-            # total_loss = reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
-
-        # gradient descent
-        self.scaler.scale(total_loss).backward()
-        self.scaler.unscale_(self.optimizer)  # for clip grad
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad(set_to_none=True)
-
-        if writer is not None and it > 0:
-            writer.add_scalar("WorldModel/tokenizer/reconstruction_loss", reconstruction_loss.item(), it)
-            writer.add_scalar("WorldModel/tokenizer/reconstruction_loss_out", reconstruction_loss_out.item(), it)
-            # writer.add_scalar("WorldModel/tokenizer/reward_loss", reward_loss.item(), it)
-            # writer.add_scalar("WorldModel/tokenizer/termination_loss", termination_loss.item(), it)
-            writer.add_scalar("WorldModel/tokenizer/total_loss", total_loss.item(), it)
-
-
-class KLDivLoss(nn.Module):
+class KLDivLoss_normal(nn.Module):
     def __init__(self,free_bits) -> None:
         super().__init__()
         self.free_bits = free_bits
@@ -765,27 +338,30 @@ class KLDivLoss(nn.Module):
         kl_div = torch.max(torch.ones_like(kl_div)*self.free_bits, kl_div)
         return kl_div, real_kl_div
 
-class WorldModel_normal(nn.Module):
-    def __init__(self, in_channels, decoder_out_channels, action_dim,
-                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads):
+class WorldModel(nn.Module):
+    def __init__(self, in_channels, decoder_out_channels, action_dim, latent_feature,
+                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads, distribution,
+                 lr=1e-4):
         super().__init__()
+        
+        self.dist_type = distribution
         self.transformer_hidden_dim = transformer_hidden_dim
+        self.in_channels = in_channels
         self.decoder_out_channels = decoder_out_channels
-        self.feature_depth = int(math.log2(transformer_hidden_dim) - 5.0) #1:64 #2:128 #3:256
-        self.stoch_dim = 8
-        self.stoch_flattened_dim = self.stoch_dim*self.stoch_dim
+        self.stoch_dim = 16
         self.use_amp = True
         self.tensor_dtype = torch.bfloat16 if self.use_amp else torch.float32
         self.imagine_batch_size = -1
         self.imagine_batch_length = -1
-        self.in_channels = in_channels
+        self.latent_feature = latent_feature
+
         self.encoder = EncoderBN(
             in_features=in_channels,
-            stem_channels=32,
-            feature_depth=self.feature_depth
+            stem_features=32,
+            latent_feature=self.latent_feature
         )
         self.storm_transformer = StochasticTransformerKVCache(
-            stoch_dim=self.stoch_flattened_dim,
+            stoch_dim=self.stoch_dim,
             action_dim=action_dim,
             feat_dim=transformer_hidden_dim,
             num_layers=transformer_num_layers,
@@ -793,87 +369,105 @@ class WorldModel_normal(nn.Module):
             max_length=transformer_max_length,
             dropout=0.1
         )
-        self.dist_head_vae = DistHeadVAE(
-            image_feat_dim=self.encoder.last_channels,
-            transformer_hidden_dim=transformer_hidden_dim,
-            stoch_dim=self.stoch_dim
-        )
-        self.dist_head_contacts = DistHead(
-            image_feat_dim=self.encoder.last_channels,
-            transformer_hidden_dim=transformer_hidden_dim,
-            stoch_dim=self.stoch_dim
-        )
+        if distribution == "vae":
+            self.dist_head = DistHeadVAE(
+                in_feat_dim=self.encoder.last_features,
+                transformer_hidden_dim=transformer_hidden_dim,
+                hidden_dim=self.stoch_dim
+            )
+        elif distribution == "stoch":
+            self.dist_head = DistHead_stoch(
+                in_feat_dim=self.encoder.last_features,
+                transformer_hidden_dim=transformer_hidden_dim,
+                stoch_dim=self.stoch_dim
+            )
         self.image_decoder = DecoderBN(
-            stoch_dim=self.stoch_flattened_dim,
-            last_channels=self.encoder.last_channels,
-            original_in_channels=decoder_out_channels,
-            stem_channels=32,
-            feature_depth=self.feature_depth
+            latent_dim = self.stoch_dim, 
+            head_feature = self.stoch_dim, 
+            output_features = self.decoder_out_channels, 
+            stem_channels = 32
         )
         self.reward_decoder = RewardDecoder(
             num_classes=1,
-            embedding_size=self.stoch_flattened_dim,
             transformer_hidden_dim=transformer_hidden_dim
         )
         self.termination_decoder = TerminationDecoder(
-            embedding_size=self.stoch_flattened_dim,
             transformer_hidden_dim=transformer_hidden_dim
         )
 
         self.mse_loss_func_obs = MSELoss()
-        self.mse_loss = MSELoss()
-        self.logcosh_loss = log_cosh_loss()
+        self.mse_loss = nn.MSELoss()
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
         # self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
-        self.kl_div_loss = KLDivLoss(free_bits = 1.0)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3,weight_decay=1e-5)
+        if distribution == "vae":
+            self.kl_div_loss = KLDivLoss_normal(free_bits=1)
+        elif distribution == "stoch":
+            self.kl_div_loss = CategoricalKLDivLossWithFreeBits(free_bits=1)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=800, gamma=0.1)
-    def encode_obs(self, obs):
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1500, gamma=0.1)
+
+    def encode_obs(self, obs,return_logits=False):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             embedding = self.encoder(obs)
-            mu_post, var_post = self.dist_head_vae.forward_post_vae(embedding)
-            flattened_sample = self.reparameterize(mu_post, var_post)
-            # flattened_sample = self.flatten_sample(sample)
-        return flattened_sample
+            sample, post_logits = self.straight_throught_gradient(embedding,dist_type=self.dist_type,post=True, return_logits=True)
+        if return_logits:
+            return sample, post_logits
+        return sample
 
-    def calc_last_dist_feat(self, latent, action):
+    def calc_last_dist_feat(self, latent):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             temporal_mask = get_subsequent_mask(latent)
-            dist_feat = self.storm_transformer(latent, action, temporal_mask)
+            dist_feat = self.storm_transformer(latent, temporal_mask)
             last_dist_feat = dist_feat[:, -1:]
-            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(last_dist_feat)
-            prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
-            # prior_flattened_sample = self.flatten_sample(prior_sample)
-        return prior_flattened_sample, last_dist_feat
+            prior_sample = self.straight_throught_gradient(last_dist_feat,dist_type=self.dist_type, post=False)
+        return prior_sample, last_dist_feat
 
-    def predict_next(self, last_flattened_sample, action, log_video=True):
+    def predict_next(self, last_sample, return_logits=False):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            dist_feat = self.storm_transformer.forward_with_kv_cache(last_flattened_sample, action)# transformer features
-            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat) # 
+            dist_feat = self.storm_transformer.forward_with_kv_cache(last_sample)# transformer features
 
             # decoding
-            prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
-            # prior_flattened_sample = self.flatten_sample(prior_sample) # the output from transformer to predict the next observation
-            if log_video:
-                obs_hat = self.image_decoder(prior_flattened_sample) # predicted next observation
-            else:
-                obs_hat = None
-            
+            prior_sample, prior_logits = self.straight_throught_gradient(dist_feat, dist_type=self.dist_type, post=False, return_logits=True)
+            # get predictions
+            obs_hat = self.image_decoder(prior_sample) # predicted next observation
+            reward_hat = self.reward_decoder(dist_feat)
+            termination_hat = self.termination_decoder(dist_feat)
+            # termination_hat = termination_hat > 0
+        if return_logits:
+            return obs_hat, reward_hat.unsqueeze(-1), termination_hat.unsqueeze(-1), prior_sample, dist_feat, prior_logits
+        return obs_hat, reward_hat.unsqueeze(-1), termination_hat.unsqueeze(-1), prior_sample, dist_feat
 
-        return obs_hat, mu_prior, var_prior, prior_flattened_sample, dist_feat
-    
-    def reparameterize(self, mu, log_var):
-        # Compute the standard deviation from the log variance
-        std = torch.exp(0.5 * log_var) + 1e-6
-        # Generate random noise using the same shape as std
-        q = Normal(mu, std)
-        # Return the reparameterized sample
-        return q.rsample()
-    
-    def flatten_sample(self, sample):
-        return rearrange(sample, "B L K C -> B L (K C)")
+    def straight_throught_gradient(self, logits, dist_type, post, return_logits=False):
+        if dist_type == "vae":
+            # normal distribution
+            if post:
+                # if posterier, use the post head
+                mu, log_var = self.dist_head.forward_post_vae(logits)
+            else:
+                # if prior, use the prior head
+                mu, log_var = self.dist_head.forward_prior_vae(logits)
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            sample = mu + eps * std
+            if return_logits:
+                return sample, (mu, log_var)
+        elif dist_type == "stoch":
+            # categorical distribution
+            if post:
+                # if posterier, use the post head
+                logits = self.dist_head.forward_post(logits)
+            else:
+                # if prior, use the prior head
+                logits = self.dist_head.forward_prior(logits)
+            dist = OneHotCategorical(logits=logits)
+            # dist = RelaxedOneHotCategorical(logits=logits)
+            sample = dist.sample() + dist.probs - dist.probs.detach()
+            if return_logits:
+                return sample, logits
+        
+        return sample
 
     def init_imagine_buffer(self, imagine_batch_size, imagine_batch_length, dtype):
         '''
@@ -885,23 +479,22 @@ class WorldModel_normal(nn.Module):
             self.imagine_batch_size = imagine_batch_size
             self.imagine_batch_length = imagine_batch_length
             # these three parameters are used to predict the future, so it will have one extra
-            latent_size = (imagine_batch_size, imagine_batch_length+1, self.stoch_flattened_dim)
+            latent_size = (imagine_batch_size, imagine_batch_length+1, self.stoch_dim)
             hidden_size = (imagine_batch_size, imagine_batch_length+1, self.transformer_hidden_dim)
             obs_hat_size = (imagine_batch_size, imagine_batch_length+1, self.decoder_out_channels) # set obs dimension
             # other parametes are saying information about the current time step
             action_size = (imagine_batch_size, imagine_batch_length, 12) # set action dimension
-            # scalar_size = (imagine_batch_size, imagine_batch_length)
+            scalar_size = (imagine_batch_size, imagine_batch_length)
             self.obs_hat_buffer = torch.zeros(obs_hat_size, dtype=dtype, device="cuda")
             self.latent_buffer = torch.zeros(latent_size, dtype=dtype, device="cuda")
             self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device="cuda")
             self.action_buffer = torch.zeros(action_size, dtype=dtype, device="cuda")
-            # self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
-            # self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+            self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+            self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
 
-    def imagine_data(self, agent: ActorCriticAgent, sample_obs, sample_action,
-                     imagine_batch_size, imagine_batch_length, log_video, logger):
+    def imagine_data(self, agent, sample_obs, sample_action,
+                     imagine_batch_size, imagine_batch_length, logger):
         self.init_imagine_buffer(imagine_batch_size, imagine_batch_length, dtype=self.tensor_dtype)
-        obs_hat_list = []
 
         self.storm_transformer.reset_kv_cache_list(imagine_batch_size, dtype=self.tensor_dtype)
         # context
@@ -909,158 +502,109 @@ class WorldModel_normal(nn.Module):
         for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
             last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
                 context_latent[:, i:i+1],
-                sample_action[:, i:i+1],
-                log_video=log_video
+                sample_action[:, i:i+1]
             )
+            last_action = sample_action[:, i:i+1]
         self.obs_hat_buffer[:, 0:1] = last_obs_hat
         self.latent_buffer[:, 0:1] = last_latent
         self.hidden_buffer[:, 0:1] = last_dist_feat
-
+        
         # imagine
         for i in range(imagine_batch_length):
-            obs_sample = self.obs_hat_buffer[:, i:i+1]
-            action = agent.sample(torch.cat([self.latent_buffer[:, i:i+1], self.hidden_buffer[:, i:i+1]], dim=-1))
+            action = agent.act(torch.cat([self.obs_hat_buffer[:, i:i+1], last_action], dim=-1))
             self.action_buffer[:, i:i+1] = action
-
+            last_action = action
             last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
-                self.latent_buffer[:, i:i+1], self.action_buffer[:, i:i+1], log_video=log_video)
+                self.latent_buffer[:, i:i+1], self.action_buffer[:, i:i+1])
 
+            self.obs_hat_buffer[:, i+1:i+2] = last_obs_hat
             self.latent_buffer[:, i+1:i+2] = last_latent
             self.hidden_buffer[:, i+1:i+2] = last_dist_feat
+
             self.reward_hat_buffer[:, i:i+1] = last_reward_hat
             self.termination_hat_buffer[:, i:i+1] = last_termination_hat
-            if log_video:
-                obs_hat_list.append(last_obs_hat[::imagine_batch_size//16])  # uniform sample vec_env
 
-        if log_video:
-            logger.log("Imagine/predict_video", torch.clamp(torch.cat(obs_hat_list, dim=1), 0, 1).cpu().float().detach().numpy())
+        return self.obs_hat_buffer, self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
 
-        return torch.cat([self.latent_buffer, self.hidden_buffer], dim=-1), self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
-    
-    def imagine_step(self, batch_size, sample_obs, sample_action, reward_sample, termination_sample, imag_step):
-        # context
-        # uset the encoder to encode the obs
-        context_latent = self.encode_obs(sample_obs[:,-1:,:])
-        
-        last_obs_hat, last_mu_prior, last_var_prior, last_latent, last_dist_feat = self.predict_next(
-                context_latent[:,-1:,:],
-                sample_action[:, -1:, :],
-                log_video=True
-            )
-        
-        # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1,:]
-        # self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1,:]
-        # self.hidden_buffer[:, 0:1] = dist_feat[:,-1,:]
-        return last_obs_hat, last_mu_prior, last_var_prior, last_latent
-
-    def setup_imagination(self, batch_size, sample_obs, sample_action, batch_length):
+    def feed_context(self, batch_size, sample_obs, sample_action, batch_length,mode="train"):
         # if start to step using imagination, initialize the buffer and reset kv_cache
+        # get the full observations or context observations
+        # returns the first predicted observation, reward and termination, and the prior samples 
+        if mode == "train":
+            self.train()
+        elif mode == "eval":
+            self.eval()
         self.init_imagine_buffer(batch_size, batch_length, dtype=self.tensor_dtype)
         self.storm_transformer.reset_kv_cache_list(batch_size, dtype=self.tensor_dtype)
-        self.storm_transformer.eval()
         # =====aggregate the kv_cache=====
         # context
-        context_latent = self.encode_obs(sample_obs)
+        embedding = self.encoder(sample_obs)
+        post_sample, post_logits = self.straight_throught_gradient(embedding,dist_type=self.dist_type,post=True, return_logits=True)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            temporal_mask = get_subsequent_mask(context_latent)
-            dist_feat = self.storm_transformer.forward_context(context_latent, sample_action, temporal_mask)
-            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
-            prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
-            # prior_flattened_sample = self.flatten_sample(prior_sample) 
-            obs_hat = self.image_decoder(prior_flattened_sample)
+            temporal_mask = get_subsequent_mask(post_sample)
+            dist_feat = self.storm_transformer.forward_context(post_sample, sample_action, temporal_mask)
+            prior_sample, prior_logits = self.straight_throught_gradient(dist_feat, dist_type=self.dist_type, post=False, return_logits=True)
+            obs_hat = self.image_decoder(prior_sample)
             reward_hat = self.reward_decoder(dist_feat)
-            # reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
             termination_hat = self.termination_decoder(dist_feat)
-            termination_hat = termination_hat > 0
-
-
-        # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1:,:]
-        self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1:,:]
-        self.hidden_buffer[:, 0:1] = dist_feat[:,-1:,:]
-        
-        return obs_hat[:, -1:,:], reward_hat[:, -1:].unsqueeze(-1), termination_hat[:, -1:].unsqueeze(-1) # return the predicted observation, the flattend
-    
-    def setup_imagination_train(self, batch_size, sample_obs, sample_action, batch_length):
-        # if start to step using imagination, initialize the buffer and reset kv_cache
-        self.init_imagine_buffer(batch_size, batch_length, dtype=self.tensor_dtype)
-        self.storm_transformer.reset_kv_cache_list(batch_size, dtype=self.tensor_dtype)
-        self.storm_transformer.train()
-        # =====aggregate the kv_cache=====
-        # context
-        context_latent = self.encode_obs(sample_obs)
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            temporal_mask = get_subsequent_mask(context_latent)
-            dist_feat = self.storm_transformer.forward_context(context_latent, sample_action, temporal_mask)
-            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
-            prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
-            # prior_flattened_sample = self.flatten_sample(prior_sample) 
-            obs_hat = self.image_decoder(prior_flattened_sample)
-            reward_hat = self.reward_decoder(dist_feat)
-            # reward_hat = self.symlog_twohot_loss_func.decode(reward_hat)
-            termination_hat = self.termination_decoder(dist_feat)
-            termination_hat = termination_hat > 0
-
-
-        # self.obs_hat_buffer[:, 0:1] = obs_hat[:, -1:,:]
-        self.latent_buffer[:, 0:1] = prior_flattened_sample[:,-1:,:]
-        self.hidden_buffer[:, 0:1] = dist_feat[:,-1:,:]
-        
-        return obs_hat[:, -1:,:], prior_flattened_sample[:,-1:,:], mu_prior[:, -1:,:], var_prior[:, -1:,:]# return the predicted observation, the flattend
+            # termination_hat = termination_hat > 0
+        # TODO: remove the kv_cache_list after 32
+        return obs_hat, reward_hat.unsqueeze(-1), termination_hat.unsqueeze(-1), prior_sample, prior_logits, post_sample, post_logits
 
     def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
+        # update by one step
         self.train()
         batch_size, batch_length = obs.shape[:2]
-        # modify the obs to not include command and actions
-        # which is obs[:, :, 9:12] and obs[:, :, 36:48]
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36], obs[:, :, 48:]], dim=-1)
-        # obs_decoder = torch.cat([obs[:, :, :9], obs[:, :, 12:36]], dim=-1)
+
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
             # encoding
-            embedding = self.encoder(obs)
-            # distribution for float values
-            mu_post, var_post = self.dist_head_vae.forward_post_vae(embedding)
-            # distribution for discrete values
-            flattened_sample = self.reparameterize(mu_post, var_post)
-            # flattened_sample = self.flatten_sample(sample)
+            embedding = self.encoder(critic_obs[:,:,:45])
+            post_sample, post_logits = self.straight_throught_gradient(embedding, dist_type=self.dist_type, post=True, return_logits=True)
 
             # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
+            obs_hat = self.image_decoder(post_sample)
 
             # transformer
-            # TODO: change mask to allowing the first batch_length to all be true
-            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
-            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
-            flattened_prior_sample = self.reparameterize(mu_prior, var_prior)
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, post_sample.device)
+            dist_feat = self.storm_transformer(post_sample, temporal_mask)
 
-            obs_hat_out = self.image_decoder(flattened_prior_sample)
-
-            # decoding reward and termination with dist_feat
-            # reward_hat = self.reward_decoder(dist_feat)
-            # termination_hat = self.termination_decoder(dist_feat)
+            prior_sample, prior_logits = self.straight_throught_gradient(dist_feat,dist_type=self.dist_type, return_logits=True, post=False)
+            
+            obs_hat_out = self.image_decoder(prior_sample)
+            reward_hat = self.reward_decoder(dist_feat)
+            termination_hat = self.termination_decoder(dist_feat)
 
             # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
+            # reconstruction loss for the observations, tokenizer update
+            # float part
+            reconstruction_loss_float = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
+            # boolean part
             reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
+            reconstruction_loss = reconstruction_loss_float + reconstruction_loss_contact
+            
+            # reconstruction loss for the observations, predictor update, passes through the transformer
+            # float part
+            reconstruction_loss_out_float  = self.mse_loss_func_obs(obs_hat_out[:,:-1,:45], critic_obs[:,1:,:45])
+            # boolean part
+            reconstruction_loss_out_contact = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
+            reconstruction_loss_out = reconstruction_loss_out_float + reconstruction_loss_out_contact
 
-            # reconstruction loss on the output
-            reconstruction_loss_contact_out = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
-            reconstruction_loss_out = self.mse_loss_func_obs(obs_hat_out[:,:-1,:45], critic_obs[:,1:,:45])
+            # reconstruction loss for the latent space, used for the dynamics and representation learning
+            latent_reconstruction_loss = self.mse_loss_func_obs(prior_sample[:,:-1,:], post_sample[:,1:,:])
 
-            reconstruction_loss = reconstruction_loss + reconstruction_loss_contact
-            reconstruction_loss_out = reconstruction_loss_out + reconstruction_loss_contact_out
-
-            latent_reconstruction = self.mse_loss_func_obs(flattened_sample[:,:-1,:], flattened_prior_sample[:,1:,:])
-            # reward_loss = self.symlog_twohot_loss_func(reward_hat, reward)
-            # reward_loss = self.mse_loss(torch.unsqueeze(reward_hat,-1), torch.unsqueeze(reward,-1))
-            # termination_loss = self.bce_with_logits_loss_func(termination_hat, termination.float())
+            reward_loss = self.mse_loss(reward_hat.unsqueeze(-1), reward)
+            termination_loss = self.bce_with_logits_loss_func(termination_hat.unsqueeze(-1), termination.float())
             # dyn-rep loss
-            dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(mu_post[:,1:,:].detach(), var_post[:,1:,:].detach(), mu_prior[:,:-1,:], var_prior[:,:-1,:])
-            representation_loss, representation_real_kl_div = self.kl_div_loss(mu_post[:,1:,:], var_post[:,1:,:], mu_prior[:,:-1,:].detach(), var_prior[:,:-1,:].detach())
-
-            total_loss = reconstruction_loss + 0.8*reconstruction_loss_out + 0.8*dynamics_loss + 0.8*representation_loss +latent_reconstruction 
-
+            if self.dist_type == "vae":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[0][:,1:,:].detach(), post_logits[1][:,1:,:].detach(), prior_logits[0][:,:-1,:], prior_logits[1][:,:-1,:])
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[0][:,1:,:], post_logits[1][:,1:,:], prior_logits[0][:,:-1,:].detach(), prior_logits[1][:,:-1,:].detach())
+            elif self.dist_type == "stoch":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
+           
+            # total_loss
+            total_loss = reconstruction_loss + reconstruction_loss_out + latent_reconstruction_loss + reward_loss + termination_loss + 0.5*dynamics_loss + 0.1*representation_loss
+        
         # gradient descent
         self.scaler.scale(total_loss).backward()
         self.scaler.unscale_(self.optimizer)  # for clip grad
@@ -1069,155 +613,577 @@ class WorldModel_normal(nn.Module):
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
 
-        observation_difference = torch.abs(obs_hat - critic_obs)
-        observation_difference = torch.flatten(observation_difference,0,1).mean(dim=0)
+        # observation_difference = torch.abs(obs_hat - critic_obs)
+        observation_difference =torch.abs(obs_hat - critic_obs).mean(dim=-1)
         base_vel_diff = observation_difference[0:3].mean()
         angle_diff = observation_difference[3:6].mean()
         projected_diff = observation_difference[6:9].mean()
         dof_pos_diff = observation_difference[9:21].mean()
         dof_vel_diff = observation_difference[21:33].mean()
-
+        torque_diff = observation_difference[33:45].mean()
+        
         if writer is not None and it > 0:
-            self.scheduler.step()
-            writer.add_scalar("WorldModel/latent_reconstruction", latent_reconstruction.item(), it)
             writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
-            writer.add_scalar("WorldModel/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
+            writer.add_scalar("WorldModel/reconstruction_loss_out", reconstruction_loss_out.item(), it)
+            writer.add_scalar("WorldModel/latent_reconstruction_loss", latent_reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/reward_loss", reward_loss.item(), it)
+            writer.add_scalar("WorldModel/termination_loss", termination_loss.item(), it)
             writer.add_scalar("WorldModel/dynamics_loss", dynamics_loss.item(), it)
-            # writer.add_scalar("WorldModel/reward_loss", reward_loss.item(), it)
-            # writer.add_scalar("WorldModel/termination_loss", termination_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.item(), it)
             writer.add_scalar("WorldModel/representation_loss", representation_loss.item(), it)
-            # writer.add_scalar("WorldModel/real_kl_loss", real_kl_loss.item(), it)
+            writer.add_scalar("WorldModel/representation_real_kl_div", representation_real_kl_div.item(), it)
             writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
+            # observation difference
             writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
-            writer.add_scalar("obs_diff/angle_diff", angle_diff.item(), it)
-            writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
+            writer.add_scalar("obs_diff/angle_vel_diff", angle_diff.item(), it)
+            writer.add_scalar("obs_diff/projected_gravity_diff", projected_diff.item(), it)
             writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
             writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
-            # writer.add_scalar("obs_diff/contact_diff", contact_diff.item(), it)
-            # writer.add_scalar("obs_diff/dof_action_diff", dof_action_diff.item(), it)
+            writer.add_scalar("obs_diff/torque_diff", torque_diff.item(), it)
+
         if return_loss:
             return reconstruction_loss
     
-    def update_tokenizer(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
+    def update_autoregressive(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, context_length=32, alpha = 1.0, return_loss=False):
         self.train()
         batch_size, batch_length = obs.shape[:2]
-        # scale reward to be larger
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # encoding
-            embedding = self.encoder(obs)
-            mu_post, var_post = self.dist_head_vae.forward_post_vae(embedding)
-            flattened_sample = self.reparameterize(mu_post, var_post)
-            # flattened_sample = self.flatten_sample(sample)
+            # pass through the full observations to get the first predicted observation, reward and termination, also get the ground truth prior samples
+            obs_hat, reward_hat, termination_hat, prior_sample, prior_logits, post_sample_full, post_logits = self.feed_context(batch_size, obs[:,:,:45], action, batch_length=batch_length)
+            # extract the first predicted observation, reward and termination
+            obs_hats = obs_hat[:,context_length-1:context_length,:] 
+            reward_hats = reward_hat[:,context_length-1:context_length,:] 
+            termination_hats = termination_hat[:,context_length-1:context_length,:]
+            prior_samples = prior_sample[:,context_length-1:context_length,:]
+            if self.dist_type == "vae":
+                mu_priors = prior_logits[0][:,context_length-1:context_length,:] 
+                var_priors = prior_logits[1][:,context_length-1:context_length,:] 
+            elif self.dist_type == "stoch":
+                prior_logits = prior_logits[:,context_length-1:context_length,:]
 
-            # decoding image
-            obs_hat = self.image_decoder(flattened_sample)
-            
-            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, flattened_sample.device)
-            dist_feat = self.storm_transformer(flattened_sample, action, temporal_mask)
-            mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(dist_feat)
-            flattened_prior_sample = self.reparameterize(mu_prior, var_prior)
-            # env loss
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hat, obs)
-            latent_reconstruction = self.mse_loss_func_obs(flattened_sample[:,:-1,:], flattened_prior_sample[:,1:,:])
-            reconstruction_loss = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
-            reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
-            
-            total_loss = reconstruction_loss + reconstruction_loss_contact + latent_reconstruction
-
-        # gradient descent
-        self.scaler.scale(total_loss).backward()
-        self.scaler.unscale_(self.optimizer)  # for clip grad
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer.zero_grad(set_to_none=True)
-
-        if writer is not None and it > 0:
-            self.scheduler.step()
-            writer.add_scalar("tokenizer/latent_reconstruction", latent_reconstruction.item(), it)
-            writer.add_scalar("tokenizer/reconstruction_loss", reconstruction_loss.item(), it)
-            writer.add_scalar("tokenizer/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
-            writer.add_scalar("tokenizer/total_loss", total_loss.item(), it)
-
-
-    def update_autoregressive(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter):
-        self.train()
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
-            # pass through the context and get the first prediction
-            obs_hat, prior_latent_sample, mu_prior, var_prior= self.setup_imagination_train(obs.shape[0], obs[:,:32,:], action[:,:32,:], 32)
-            embedding = self.encoder(obs)
-            mu_post, var_post = self.dist_head_vae.forward_post_vae(embedding)
-            flattened_sample = self.reparameterize(mu_post, var_post)
-            obs_hats = obs_hat
-            latent_sampels = prior_latent_sample
-            mu_priors = mu_prior
-            var_priors = var_prior
+            # initialize the losses
             total_loss = 0
-            total_loss += self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,32:33,:45])
-            total_loss += self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,32:33,45:])
-            total_loss += self.mse_loss_func_obs(prior_latent_sample, flattened_sample[:,32:33,:])
-            alpha = 0.8
+            reconstruction_loss_out = 0
+            latent_reconstruction_loss = 0
+            reward_loss = 0
+            termination_loss = 0
+            dynamics_losses = 0
+            real_dynamics_kl_dives = 0
+            representation_losses = 0
+            real_representation_kl_dives = 0
+
+            # reconstruction loss for the first predicted observation, reward and termination
+            reconstruction_loss_out += self.mse_loss_func_obs(obs_hats[:,-1:,:45], critic_obs[:,context_length:context_length+1,:45])
+            reconstruction_loss_out += self.bce_with_logits_loss_func(obs_hats[:,-1:,45:], critic_obs[:,context_length:context_length+1,45:])
             
-            for i in range(7):
-                action_sample = action[:, 32+i:32+i+1, :]
-                pred_obs_full = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
-                                        obs[:,32+i:32+i+1,9:12],               # cmd_tensor
-                                            obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-                                            action_sample
-                                            ], dim=-1)
-                
-                obs_hat, mu_prior, var_prior, prior_latent_sample = self.imagine_step( None, pred_obs_full, action_sample, None, None, None)
+            # reconstruction loss for the reward and termination
+            reward_loss += self.mse_loss(reward_hats[:,-1:,:], reward[:,context_length:context_length+1,:])
+            termination_loss += self.bce_with_logits_loss_func(termination_hats[:,-1:,:], termination[:,context_length:context_length+1,:].float())
+            
+            # reconstruction loss for the latent space
+            latent_reconstruction_loss += self.mse_loss_func_obs(prior_samples[:,-1:,:], post_sample_full[:,context_length:context_length+1,:])
+            
+            # dyn-rep loss
+            if self.dist_type == "vae":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length:context_length+1,:].detach(), post_logits[1][:,context_length:context_length+1,:].detach(), mu_priors, var_priors)
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length:context_length+1,:], post_logits[1][:,context_length:context_length+1,:], mu_priors.detach(), var_priors.detach())
+            elif self.dist_type == "stoch":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[:, context_length:context_length+1].detach(), prior_logits)
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[:, context_length:context_length+1], prior_logits.detach())
+            # Store dyn-rep losses
+            dynamics_losses += 0.5 * dynamics_loss
+            real_dynamics_kl_dives += dynamics_real_kl_div
+            representation_losses += 0.1 * representation_loss
+            real_representation_kl_dives += representation_real_kl_div
+
+            for i in range(batch_length-context_length-1):
+                action_sample = action[:, context_length+i:context_length+i+1, :]
+                torques = compute_torques(action_sample, obs_hats[:, -1:, 9:21], obs_hats[:, -1:, 21:33])
+                pred_obs_full = torch.cat([ obs_hats[:, -1:, :33],       # First 9 elements of pred_obs
+                                            action_sample], dim=-1)
+                post_sample, _ = self.encode_obs(pred_obs_full,return_logits=True)
+                obs_hat, reward_hat, termination_hat, prior_sample, dist_feat, prior_logit = self.predict_next(post_sample, return_logits=True)
                 obs_hats = torch.cat([obs_hats, obs_hat], dim=1)
-                latent_sampels = torch.cat([latent_sampels, prior_latent_sample], dim=1)
-                mu_priors = torch.cat([mu_priors, mu_prior], dim=1)
-                var_priors = torch.cat([var_priors, var_prior], dim=1)
+                reward_hats = torch.cat([reward_hats, reward_hat], dim=1)
+                termination_hats = torch.cat([termination_hats, termination_hat], dim=1)
+                prior_samples = torch.cat([prior_samples, prior_sample], dim=1)
+                if self.dist_type == "vae":
+                    mu_priors = torch.cat([mu_priors, prior_logit[0]], dim=1)
+                    var_priors = torch.cat([var_priors, prior_logit[1]], dim=1)
+                elif self.dist_type == "stoch":
+                    prior_logits = torch.cat([prior_logits, prior_logit], dim=1)
 
-                total_loss += alpha**i * self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,33+i:33+i+1,:45])
-                total_loss += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,33+i:33+i+1,45:])
-                total_loss += alpha**i * self.mse_loss_func_obs(latent_sampels, flattened_sample[:,33+i:33+i+1,:])
-            
-            
-
-            # latent_reconstruction = self.mse_loss_func_obs(latent_sampels, flattened_sample[:,-8:,:])
-            # reconstruction_loss = self.mse_loss_func_obs(obs_hats[:,:,:45], critic_obs[:,-8:,:45])
-            # latent_reconstruction = self.logcosh_loss(latent_sampels, flattened_sample[:,-8:,:])
-            # reconstruction_loss = self.logcosh_loss(obs_hats[:,:,:45], critic_obs[:,-8:,:45])
-            # reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hats[:,:,45:], critic_obs[:,-8:,45:])
-            dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(mu_post[:,-8:,:].detach(), var_post[:,-8:,:].detach(), mu_priors[:,:,:], var_priors[:,:,:])
-            representation_loss, representation_real_kl_div = self.kl_div_loss(mu_post[:,-8:,:], var_post[:,-8:,:], mu_priors[:,:,:].detach(), var_priors[:,:,:].detach())
-            
-            
-            total_loss = total_loss + 0.5 * dynamics_loss+ 0.1 * representation_loss
-        # gradient descent
+                # reconstruction loss for the predicted observation, reward and termination
+                reconstruction_loss_out += alpha**i * self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,context_length+1+i:context_length+2+i,:45])
+                reconstruction_loss_out += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,context_length+1+i:context_length+2+i,45:])
+                
+                # reconstruction loss for the reward and termination
+                reward_loss += alpha**i * self.mse_loss(reward_hat, reward[:,context_length+1+i:context_length+2+i,:])
+                termination_loss += alpha**i * self.bce_with_logits_loss_func(termination_hat, termination[:,context_length+1+i:context_length+2+i,:].float())
+                
+                # reconstruction loss for the latent space
+                latent_reconstruction_loss += alpha**i * self.mse_loss_func_obs(prior_samples[:,-1:,:], post_sample_full[:,context_length+1+i:context_length+2+i,:])
+                
+                # dyn-rep loss
+                if self.dist_type == "vae":
+                    dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length+1+i:context_length+2+i,:].detach(), post_logits[1][:,context_length+1+i:context_length+2+i,:].detach()
+                                                                           ,mu_priors[:,-1:,:], var_priors[:,-1:,:])
+                    representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length+1+i:context_length+2+i,:], post_logits[1][:,context_length+1+i:context_length+2+i,:], 
+                                                                                       mu_priors[:,-1:,:].detach(), mu_priors[:,-1:,:].detach())
+                elif self.dist_type == "stoch":
+                    dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[:, context_length+1+i:context_length+2+i, :].detach(), prior_logits[:, -1:, :])
+                    representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[:, context_length+1+i:context_length+2+i,:], prior_logits[:, -1:,:].detach())
+                # Store dyn-rep losses
+                dynamics_losses += alpha**i * 0.5 * dynamics_loss
+                real_dynamics_kl_dives += alpha**i *dynamics_real_kl_div
+                representation_losses += alpha**i * 0.1 * representation_loss
+                real_representation_kl_dives += alpha**i * representation_real_kl_div
+                
+            total_loss = reconstruction_loss_out + latent_reconstruction_loss + reward_loss + termination_loss + dynamics_losses + representation_losses
+        
+         # gradient descent
         self.scaler.scale(total_loss).backward()
         self.scaler.unscale_(self.optimizer)  # for clip grad
         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
-        observation_difference = torch.abs(obs_hat - critic_obs)
-        observation_difference = torch.flatten(observation_difference,0,1).mean(dim=0)
+
+        # calculate the observation difference
+        observation_difference =torch.abs(obs_hat - critic_obs).mean(dim=-1)
         base_vel_diff = observation_difference[0:3].mean()
         angle_diff = observation_difference[3:6].mean()
         projected_diff = observation_difference[6:9].mean()
         dof_pos_diff = observation_difference[9:21].mean()
         dof_vel_diff = observation_difference[21:33].mean()
+        torque_diff = observation_difference[33:45].mean()
 
         if writer is not None and it > 0:
             self.scheduler.step()
-            # writer.add_scalar("autoregresser/reconstruction_loss", reconstruction_loss.item(), it)
-            # writer.add_scalar("autoregresser/reconstruction_loss_contact", reconstruction_loss_contact.item(), it)
-            writer.add_scalar("autoregresser/total_loss", total_loss.item(), it)
+            writer.add_scalar("WorldModel/reconstruction_loss_out", reconstruction_loss_out.item(), it)
+            writer.add_scalar("WorldModel/latent_reconstruction_loss", latent_reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/reward_loss", reward_loss.item(), it)
+            writer.add_scalar("WorldModel/termination_loss", termination_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_loss", dynamics_losses.item(), it)
+            writer.add_scalar("WorldModel/dynamics_real_kl_div", real_dynamics_kl_dives.item(), it)
+            writer.add_scalar("WorldModel/representation_loss", representation_losses.item(), it)
+            writer.add_scalar("WorldModel/representation_real_kl_div", real_representation_kl_dives.item(), it)
+            writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
+
             writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
-            writer.add_scalar("obs_diff/angle_diff", angle_diff.item(), it)
-            writer.add_scalar("obs_diff/projected_diff", projected_diff.item(), it)
+            writer.add_scalar("obs_diff/angle_vel_diff", angle_diff.item(), it)
+            writer.add_scalar("obs_diff/projected_gravity_diff", projected_diff.item(), it)
             writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
             writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
-            writer.add_scalar("autoregresser/dynamics_loss", dynamics_loss.item(), it)
-            writer.add_scalar("autoregresser/representation_loss", representation_loss.item(), it)
-            writer.add_scalar("autoregresser/dynamics_real_kl_div", dynamics_real_kl_div.item(), it)
-            writer.add_scalar("autoregresser/representation_real_kl_div", representation_real_kl_div.item(), it)
+            writer.add_scalar("obs_diff/torque_diff", torque_diff.item(), it)
+
+class WorldModel_no_rew_term(nn.Module):
+    def __init__(self, in_channels, decoder_out_channels, action_dim, latent_feature,
+                 transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads, distribution,
+                 lr=1e-4):
+        super().__init__()
+        
+        self.dist_type = distribution
+        self.transformer_hidden_dim = transformer_hidden_dim
+        self.in_channels = in_channels
+        self.decoder_out_channels = decoder_out_channels
+        self.stoch_dim = 16
+        self.use_amp = True
+        self.tensor_dtype = torch.bfloat16 if self.use_amp else torch.float32
+        self.imagine_batch_size = -1
+        self.imagine_batch_length = -1
+        self.latent_feature = latent_feature
+
+        self.encoder = EncoderBN(
+            in_features=in_channels,
+            stem_features=32,
+            latent_feature=self.latent_feature
+        )
+        self.storm_transformer = StochasticTransformerKVCache(
+            stoch_dim=self.stoch_dim,
+            action_dim=action_dim,
+            feat_dim=transformer_hidden_dim,
+            num_layers=transformer_num_layers,
+            num_heads=transformer_num_heads,
+            max_length=transformer_max_length,
+            dropout=0.1
+        )
+        if distribution == "vae":
+            self.dist_head = DistHeadVAE(
+                in_feat_dim=self.encoder.last_features,
+                transformer_hidden_dim=transformer_hidden_dim,
+                hidden_dim=self.stoch_dim
+            )
+        elif distribution == "stoch":
+            self.dist_head = DistHead_stoch(
+                in_feat_dim=self.encoder.last_features,
+                transformer_hidden_dim=transformer_hidden_dim,
+                stoch_dim=self.stoch_dim
+            )
+        self.image_decoder = DecoderBN(
+            latent_dim = self.stoch_dim, 
+            head_feature = self.stoch_dim, 
+            output_features = self.decoder_out_channels, 
+            stem_channels = 32
+        )
+
+        self.mse_loss_func_obs = MSELoss()
+        self.mse_loss = nn.MSELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
+        # self.symlog_twohot_loss_func = SymLogTwoHotLoss(num_classes=255, lower_bound=-20, upper_bound=20)
+        if distribution == "vae":
+            self.kl_div_loss = KLDivLoss_normal(free_bits=1)
+        elif distribution == "stoch":
+            self.kl_div_loss = CategoricalKLDivLossWithFreeBits(free_bits=1)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=1e-5)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1500, gamma=0.1)
+
+    def encode_obs(self, obs,return_logits=False):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            embedding = self.encoder(obs)
+            sample, post_logits = self.straight_throught_gradient(embedding,dist_type=self.dist_type,post=True, return_logits=True)
+        if return_logits:
+            return sample, post_logits
+        return sample
+
+    def calc_last_dist_feat(self, latent):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            temporal_mask = get_subsequent_mask(latent)
+            dist_feat = self.storm_transformer(latent, temporal_mask)
+            last_dist_feat = dist_feat[:, -1:]
+            prior_sample = self.straight_throught_gradient(last_dist_feat,dist_type=self.dist_type, post=False)
+        return prior_sample, last_dist_feat
+
+    def predict_next(self, last_sample, return_logits=False):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            dist_feat = self.storm_transformer.forward_with_kv_cache(last_sample)# transformer features
+
+            # decoding
+            prior_sample, prior_logits = self.straight_throught_gradient(dist_feat, dist_type=self.dist_type, post=False, return_logits=True)
+            # get predictions
+            obs_hat = self.image_decoder(prior_sample) # predicted next observation
+            # termination_hat = termination_hat > 0
+        if return_logits:
+            return obs_hat, prior_sample, dist_feat, prior_logits
+        return obs_hat, prior_sample, dist_feat
+
+    def straight_throught_gradient(self, logits, dist_type, post, return_logits=False):
+        if dist_type == "vae":
+            # normal distribution
+            if post:
+                # if posterier, use the post head
+                mu, log_var = self.dist_head.forward_post_vae(logits)
+            else:
+                # if prior, use the prior head
+                mu, log_var = self.dist_head.forward_prior_vae(logits)
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            sample = mu + eps * std
+            if return_logits:
+                return sample, (mu, log_var)
+        elif dist_type == "stoch":
+            # categorical distribution
+            if post:
+                # if posterier, use the post head
+                logits = self.dist_head.forward_post(logits)
+            else:
+                # if prior, use the prior head
+                logits = self.dist_head.forward_prior(logits)
+            dist = OneHotCategorical(logits=logits)
+            # dist = RelaxedOneHotCategorical(logits=logits)
+            sample = dist.sample() + dist.probs - dist.probs.detach()
+            if return_logits:
+                return sample, logits
+        
+        return sample
+
+    def init_imagine_buffer(self, imagine_batch_size, imagine_batch_length, dtype):
+        '''
+        This can slightly improve the efficiency of imagine_data
+        But may vary across different machines
+        '''
+        if self.imagine_batch_size != imagine_batch_size or self.imagine_batch_length != imagine_batch_length:
+            print(f"init_imagine_buffer: {imagine_batch_size}x{imagine_batch_length}@{dtype}")
+            self.imagine_batch_size = imagine_batch_size
+            self.imagine_batch_length = imagine_batch_length
+            # these three parameters are used to predict the future, so it will have one extra
+            latent_size = (imagine_batch_size, imagine_batch_length+1, self.stoch_dim)
+            hidden_size = (imagine_batch_size, imagine_batch_length+1, self.transformer_hidden_dim)
+            obs_hat_size = (imagine_batch_size, imagine_batch_length+1, self.decoder_out_channels) # set obs dimension
+            # other parametes are saying information about the current time step
+            action_size = (imagine_batch_size, imagine_batch_length, 12) # set action dimension
+            scalar_size = (imagine_batch_size, imagine_batch_length)
+            self.obs_hat_buffer = torch.zeros(obs_hat_size, dtype=dtype, device="cuda")
+            self.latent_buffer = torch.zeros(latent_size, dtype=dtype, device="cuda")
+            self.hidden_buffer = torch.zeros(hidden_size, dtype=dtype, device="cuda")
+            self.action_buffer = torch.zeros(action_size, dtype=dtype, device="cuda")
+            self.reward_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+            self.termination_hat_buffer = torch.zeros(scalar_size, dtype=dtype, device="cuda")
+
+    def imagine_data(self, agent, sample_obs, sample_action,
+                     imagine_batch_size, imagine_batch_length, logger):
+        self.init_imagine_buffer(imagine_batch_size, imagine_batch_length, dtype=self.tensor_dtype)
+
+        self.storm_transformer.reset_kv_cache_list(imagine_batch_size, dtype=self.tensor_dtype)
+        # context
+        context_latent = self.encode_obs(sample_obs)
+        for i in range(sample_obs.shape[1]):  # context_length is sample_obs.shape[1]
+            last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
+                context_latent[:, i:i+1],
+                sample_action[:, i:i+1]
+            )
+            last_action = sample_action[:, i:i+1]
+        self.obs_hat_buffer[:, 0:1] = last_obs_hat
+        self.latent_buffer[:, 0:1] = last_latent
+        self.hidden_buffer[:, 0:1] = last_dist_feat
+        
+        # imagine
+        for i in range(imagine_batch_length):
+            action = agent.act(torch.cat([self.obs_hat_buffer[:, i:i+1], last_action], dim=-1))
+            self.action_buffer[:, i:i+1] = action
+            last_action = action
+            last_obs_hat, last_reward_hat, last_termination_hat, last_latent, last_dist_feat = self.predict_next(
+                self.latent_buffer[:, i:i+1], self.action_buffer[:, i:i+1])
+
+            self.obs_hat_buffer[:, i+1:i+2] = last_obs_hat
+            self.latent_buffer[:, i+1:i+2] = last_latent
+            self.hidden_buffer[:, i+1:i+2] = last_dist_feat
+
+            self.reward_hat_buffer[:, i:i+1] = last_reward_hat
+            self.termination_hat_buffer[:, i:i+1] = last_termination_hat
+
+        return self.obs_hat_buffer, self.action_buffer, self.reward_hat_buffer, self.termination_hat_buffer
+
+    def feed_context(self, batch_size, sample_obs, sample_action, batch_length,mode="train"):
+        # if start to step using imagination, initialize the buffer and reset kv_cache
+        # get the full observations or context observations
+        # returns the first predicted observation, reward and termination, and the prior samples 
+        if mode == "train":
+            self.train()
+        elif mode == "eval":
+            self.eval()
+        self.init_imagine_buffer(batch_size, batch_length, dtype=self.tensor_dtype)
+        self.storm_transformer.reset_kv_cache_list(batch_size, dtype=self.tensor_dtype)
+        # =====aggregate the kv_cache=====
+        # context
+        embedding = self.encoder(sample_obs)
+        post_sample, post_logits = self.straight_throught_gradient(embedding,dist_type=self.dist_type,post=True, return_logits=True)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            temporal_mask = get_subsequent_mask(post_sample)
+            dist_feat = self.storm_transformer.forward_context(post_sample, sample_action, temporal_mask)
+            prior_sample, prior_logits = self.straight_throught_gradient(dist_feat, dist_type=self.dist_type, post=False, return_logits=True)
+            obs_hat = self.image_decoder(prior_sample)
+
+        # TODO: remove the kv_cache_list after 32
+        return obs_hat, prior_sample, prior_logits, post_sample, post_logits
+
+    def update(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, return_loss=False):
+        # update by one step
+        self.train()
+        batch_size, batch_length = obs.shape[:2]
+
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            # encoding
+            embedding = self.encoder(critic_obs[:,:,:45])
+            post_sample, post_logits = self.straight_throught_gradient(embedding, dist_type=self.dist_type, post=True, return_logits=True)
+
+            # decoding image
+            obs_hat = self.image_decoder(post_sample)
+
+            # transformer
+            temporal_mask = get_subsequent_mask_with_batch_length(batch_length, post_sample.device)
+            dist_feat = self.storm_transformer(post_sample, temporal_mask)
+
+            prior_sample, prior_logits = self.straight_throught_gradient(dist_feat,dist_type=self.dist_type, return_logits=True, post=False)
+            
+            obs_hat_out = self.image_decoder(prior_sample)
+
+            # env loss
+            # reconstruction loss for the observations, tokenizer update
+            # float part
+            reconstruction_loss_float = self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,:,:45])
+            # boolean part
+            reconstruction_loss_contact = self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,:,45:])
+            reconstruction_loss = reconstruction_loss_float + reconstruction_loss_contact
+            
+            # reconstruction loss for the observations, predictor update, passes through the transformer
+            # float part
+            reconstruction_loss_out_float  = self.mse_loss_func_obs(obs_hat_out[:,:-1,:45], critic_obs[:,1:,:45])
+            # boolean part
+            reconstruction_loss_out_contact = self.bce_with_logits_loss_func(obs_hat_out[:,:-1,45:], critic_obs[:,1:,45:])
+            reconstruction_loss_out = reconstruction_loss_out_float + reconstruction_loss_out_contact
+
+            # reconstruction loss for the latent space, used for the dynamics and representation learning
+            latent_reconstruction_loss = self.mse_loss_func_obs(prior_sample[:,:-1,:], post_sample[:,1:,:])
+
+            # dyn-rep loss
+            if self.dist_type == "vae":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[0][:,1:,:].detach(), post_logits[1][:,1:,:].detach(), prior_logits[0][:,:-1,:], prior_logits[1][:,:-1,:])
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[0][:,1:,:], post_logits[1][:,1:,:], prior_logits[0][:,:-1,:].detach(), prior_logits[1][:,:-1,:].detach())
+            elif self.dist_type == "stoch":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[:, 1:].detach(), prior_logits[:, :-1])
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[:, 1:], prior_logits[:, :-1].detach())
+           
+            # total_loss
+            total_loss = reconstruction_loss + reconstruction_loss_out + latent_reconstruction_loss + 0.5*dynamics_loss + 0.1*representation_loss
+        
+        # gradient descent
+        self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)  # for clip grad
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        # observation_difference = torch.abs(obs_hat - critic_obs)
+        observation_difference =torch.abs(obs_hat - critic_obs).mean(dim=-1)
+        base_vel_diff = observation_difference[0:3].mean()
+        angle_diff = observation_difference[3:6].mean()
+        projected_diff = observation_difference[6:9].mean()
+        dof_pos_diff = observation_difference[9:21].mean()
+        dof_vel_diff = observation_difference[21:33].mean()
+        torque_diff = observation_difference[33:45].mean()
+        
+        if writer is not None and it > 0:
+            writer.add_scalar("WorldModel/reconstruction_loss", reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/reconstruction_loss_out", reconstruction_loss_out.item(), it)
+            writer.add_scalar("WorldModel/latent_reconstruction_loss", latent_reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_loss", dynamics_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_real_kl_div", dynamics_real_kl_div.item(), it)
+            writer.add_scalar("WorldModel/representation_loss", representation_loss.item(), it)
+            writer.add_scalar("WorldModel/representation_real_kl_div", representation_real_kl_div.item(), it)
+            writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
+            # observation difference
+            writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
+            writer.add_scalar("obs_diff/angle_vel_diff", angle_diff.item(), it)
+            writer.add_scalar("obs_diff/projected_gravity_diff", projected_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
+            writer.add_scalar("obs_diff/torque_diff", torque_diff.item(), it)
+
+        if return_loss:
+            return reconstruction_loss
+    
+    def update_autoregressive(self, obs, critic_obs, action, reward, termination, it, writer: SummaryWriter, context_length=32, alpha = 1.0, return_loss=False):
+        self.train()
+        batch_size, batch_length = obs.shape[:2]
+
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            # pass through the full observations to get the first predicted observation, reward and termination, also get the ground truth prior samples
+            obs_hat, prior_sample, prior_logits, post_sample_full, post_logits = self.feed_context(batch_size, obs[:,:,:45], action, batch_length=batch_length)
+            # extract the first predicted observation, reward and termination
+            obs_hats = obs_hat[:,context_length-1:context_length,:] 
+            prior_samples = prior_sample[:,context_length-1:context_length,:]
+            if self.dist_type == "vae":
+                mu_priors = prior_logits[0][:,context_length-1:context_length,:] 
+                var_priors = prior_logits[1][:,context_length-1:context_length,:] 
+            elif self.dist_type == "stoch":
+                prior_logits = prior_logits[:,context_length-1:context_length,:]
+
+            # initialize the losses
+            total_loss = 0
+            reconstruction_loss_out = 0
+            latent_reconstruction_loss = 0
+            dynamics_losses = 0
+            real_dynamics_kl_dives = 0
+            representation_losses = 0
+            real_representation_kl_dives = 0
+
+            # reconstruction loss for the first predicted observation
+            reconstruction_loss_out += self.mse_loss_func_obs(obs_hats[:,-1:,:45], critic_obs[:,context_length:context_length+1,:45])
+            reconstruction_loss_out += self.bce_with_logits_loss_func(obs_hats[:,-1:,45:], critic_obs[:,context_length:context_length+1,45:])
+            
+            # reconstruction loss for the latent space
+            latent_reconstruction_loss += self.mse_loss_func_obs(prior_samples[:,-1:,:], post_sample_full[:,context_length:context_length+1,:])
+            
+            # dyn-rep loss
+            if self.dist_type == "vae":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length:context_length+1,:].detach(), post_logits[1][:,context_length:context_length+1,:].detach(), mu_priors, var_priors)
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length:context_length+1,:], post_logits[1][:,context_length:context_length+1,:], mu_priors.detach(), var_priors.detach())
+            elif self.dist_type == "stoch":
+                dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[:, context_length:context_length+1].detach(), prior_logits)
+                representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[:, context_length:context_length+1], prior_logits.detach())
+            # Store dyn-rep losses
+            dynamics_losses += 0.5 * dynamics_loss
+            real_dynamics_kl_dives += dynamics_real_kl_div
+            representation_losses += 0.1 * representation_loss
+            real_representation_kl_dives += representation_real_kl_div
+
+            for i in range(batch_length-context_length-1):
+                action_sample = action[:, context_length+i:context_length+i+1, :]
+                torques = compute_torques(action_sample, obs_hats[:, -1:, 9:21], obs_hats[:, -1:, 21:33])
+                pred_obs_full = torch.cat([ obs_hats[:, -1:, :33],       # First 9 elements of pred_obs
+                                            action_sample], dim=-1)
+                post_sample, _ = self.encode_obs(pred_obs_full,return_logits=True)
+                obs_hat, prior_sample, dist_feat, prior_logit = self.predict_next(post_sample, return_logits=True)
+                obs_hats = torch.cat([obs_hats, obs_hat], dim=1)
+                prior_samples = torch.cat([prior_samples, prior_sample], dim=1)
+                if self.dist_type == "vae":
+                    mu_priors = torch.cat([mu_priors, prior_logit[0]], dim=1)
+                    var_priors = torch.cat([var_priors, prior_logit[1]], dim=1)
+                elif self.dist_type == "stoch":
+                    prior_logits = torch.cat([prior_logits, prior_logit], dim=1)
+
+                # reconstruction loss for the predicted observation
+                reconstruction_loss_out += alpha**i * self.mse_loss_func_obs(obs_hat[:,:,:45], critic_obs[:,context_length+1+i:context_length+2+i,:45])
+                reconstruction_loss_out += alpha**i * self.bce_with_logits_loss_func(obs_hat[:,:,45:], critic_obs[:,context_length+1+i:context_length+2+i,45:])
+                
+                # reconstruction loss for the latent space
+                latent_reconstruction_loss += alpha**i * self.mse_loss_func_obs(prior_samples[:,-1:,:], post_sample_full[:,context_length+1+i:context_length+2+i,:])
+                
+                # dyn-rep loss
+                if self.dist_type == "vae":
+                    dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length+1+i:context_length+2+i,:].detach(), post_logits[1][:,context_length+1+i:context_length+2+i,:].detach()
+                                                                           ,mu_priors[:,-1:,:], var_priors[:,-1:,:])
+                    representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[0][:,context_length+1+i:context_length+2+i,:], post_logits[1][:,context_length+1+i:context_length+2+i,:], 
+                                                                                       mu_priors[:,-1:,:].detach(), mu_priors[:,-1:,:].detach())
+                elif self.dist_type == "stoch":
+                    dynamics_loss, dynamics_real_kl_div = self.kl_div_loss(post_logits[:, context_length+1+i:context_length+2+i, :].detach(), prior_logits[:, -1:, :])
+                    representation_loss, representation_real_kl_div = self.kl_div_loss(post_logits[:, context_length+1+i:context_length+2+i,:], prior_logits[:, -1:,:].detach())
+                # Store dyn-rep losses
+                dynamics_losses += alpha**i * 0.5 * dynamics_loss
+                real_dynamics_kl_dives += alpha**i *dynamics_real_kl_div
+                representation_losses += alpha**i * 0.1 * representation_loss
+                real_representation_kl_dives += alpha**i * representation_real_kl_div
+                
+            total_loss = reconstruction_loss_out + latent_reconstruction_loss + dynamics_losses + representation_losses
+        
+         # gradient descent
+        self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)  # for clip grad
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1000.0)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        # calculate the observation difference
+        observation_difference =torch.abs(obs_hat - critic_obs).mean(dim=-1)
+        base_vel_diff = observation_difference[0:3].mean()
+        angle_diff = observation_difference[3:6].mean()
+        projected_diff = observation_difference[6:9].mean()
+        dof_pos_diff = observation_difference[9:21].mean()
+        dof_vel_diff = observation_difference[21:33].mean()
+        torque_diff = observation_difference[33:45].mean()
+
+        if writer is not None and it > 0:
+            self.scheduler.step()
+            writer.add_scalar("WorldModel/reconstruction_loss_out", reconstruction_loss_out.item(), it)
+            writer.add_scalar("WorldModel/latent_reconstruction_loss", latent_reconstruction_loss.item(), it)
+            writer.add_scalar("WorldModel/dynamics_loss", dynamics_losses.item(), it)
+            writer.add_scalar("WorldModel/dynamics_real_kl_div", real_dynamics_kl_dives.item(), it)
+            writer.add_scalar("WorldModel/representation_loss", representation_losses.item(), it)
+            writer.add_scalar("WorldModel/representation_real_kl_div", real_representation_kl_dives.item(), it)
+            writer.add_scalar("WorldModel/total_loss", total_loss.item(), it)
+
+            writer.add_scalar("obs_diff/base_vel_diff", base_vel_diff.item(), it)
+            writer.add_scalar("obs_diff/angle_vel_diff", angle_diff.item(), it)
+            writer.add_scalar("obs_diff/projected_gravity_diff", projected_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_pos_diff", dof_pos_diff.item(), it)
+            writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
+            writer.add_scalar("obs_diff/torque_diff", torque_diff.item(), it)
 
 class WorldModel_GRU(nn.Module):
     def __init__(self, obs_dim, decoder_out_channels, gru_hidden_size=256, mlp_hidden_size=128):
@@ -1290,34 +1256,6 @@ class WorldModel_GRU(nn.Module):
         obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
 
         return obs_hat, h
-        # pred_seq = []
-        # input_t = obs_sequence[:,-1:,:]
-        
-        # for _ in range(prediction_horizon):
-        #     action_sample = action_sequence[:, -1:, :] # (batch, 1, action_dim)
-        #     command_sample = obs_sequence[:, -1:, 9:12] # (batch, 1, 3)
-        #     obs_hat,h = self.gru(input_t, h) # out: (batch, 1, hidden_dim)
-        #     obs_hat = self.obs_head(obs_hat) # obs_hat: (batch, 1, input_dim)
-        #     mu_o, logvar_o = torch.chunk(obs_hat, 2, dim=-1)
-        #     obs_hat = self.reparameterize(mu_o, logvar_o)
-        #     pred_seq.append(obs_hat)
-        #     input_t = torch.cat([obs_hat[:, :, :9],       # First 9 elements of pred_obs
-        #                          command_sample,               # cmd_tensor
-        #                          obs_hat[:, :, 9:33],     # Remaining elements of pred_obs (from index 9 to 32)
-        #                          action_sample
-        #                         ], dim=-1)
-        #      # use prediction as next input
-
-        # return torch.cat(pred_seq, dim=1)     # (batch, future_steps, input_dim)
-    
-    def compute_torques(self, actions, dof_pos_diff, dof_vel):
-        actions_scaled = actions * 0.25
-        # dof_pos_diff = -1*obs[9:21]/obs_scales.dof_pos
-        # dof_vel = obs[21:33]/obs_scales.dof_vel
-        dof_pos_diff = dof_pos_diff / 1.0
-        dof_vel = dof_vel / 0.05
-        torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
-        return torques
 
     def autoregressive_training_step(self, obs, critic_obs, actions, alpha=1.0, context_length=32, pred_length=8,writer=None,it=0):
         """
@@ -1348,7 +1286,7 @@ class WorldModel_GRU(nn.Module):
                 # predict the 32+i step
                 obs_hat,h = self.forward(input_t, h) # out: (batch, 1, hidden_dim)
                 action_sample = actions[:, 32+i:32+1+i, :] # (batch, 1, action_dim)
-                torques = self.compute_torques(action_sample, obs_hat[:, :, 9:21], obs_hat[:, :, 21:33])
+                torques = compute_torques(action_sample, obs_hat[:, :, 9:21], obs_hat[:, :, 21:33])
                 input_t = torch.cat([obs_hat[:, :, :33],       # First 9 elements of pred_obs
                                      torques
                                     ], dim=-1)
@@ -1388,7 +1326,7 @@ class WorldModel_GRU(nn.Module):
             writer.add_scalar("obs_diff/dof_vel_diff", dof_vel_diff.item(), it)
 
 class WorldModel_normal_small(nn.Module):
-    def __init__(self, in_channels, decoder_out_channels, action_dim,
+    def __init__(self, in_channels, decoder_out_channels,
                  transformer_max_length, transformer_hidden_dim, transformer_num_layers, transformer_num_heads,
                  lr = 1e-3):
         super().__init__()
@@ -1419,8 +1357,8 @@ class WorldModel_normal_small(nn.Module):
         self.logcosh_loss = log_cosh_loss()
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
-        self.kl_div_loss = KLDivLoss(free_bits = 1.0)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr,weight_decay=1e-5)
+        self.kl_div_loss = KLDivLoss_normal(free_bits = 1.0)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=lr,weight_decay=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1500, gamma=0.1)
 
@@ -1431,7 +1369,6 @@ class WorldModel_normal_small(nn.Module):
             last_dist_feat = dist_feat[:, -1:]
             mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(last_dist_feat)
             prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
-            # prior_flattened_sample = self.flatten_sample(prior_sample)
         return prior_flattened_sample, last_dist_feat
 
     def predict_next(self, sample):
@@ -1458,6 +1395,18 @@ class WorldModel_normal_small(nn.Module):
             obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
         return obs_hat, trans_feat
 
+    def predict_next_without_kv_cache_with_attention(self, sample, mask):
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16, enabled=self.use_amp):
+            trans_feat, attns = self.storm_transformer.forward_with_attention(sample, mask) # transformer features
+            obs_hat = self.obs_head(trans_feat)
+            obs_dist = self.float_head(obs_hat)
+            bool_logits = self.bool_head(obs_hat)
+            bool_out = torch.sigmoid(bool_logits)
+            mu_o, logvar_o = torch.chunk(obs_dist, 2, dim=-1)
+            obs_hat = self.reparameterize(mu_o, logvar_o)
+            obs_hat = torch.cat([obs_hat, bool_out], dim=-1)
+        return obs_hat, trans_feat, attns
+
     def reparameterize(self, mu, log_var):
         # Compute the standard deviation from the log variance
         std = torch.exp(0.5 * log_var) + 1e-6
@@ -1474,9 +1423,6 @@ class WorldModel_normal_small(nn.Module):
         dof_vel = dof_vel / 0.05
         torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
         return torques
-
-    def flatten_sample(self, sample):
-        return rearrange(sample, "B L K C -> B L (K C)")
 
     def setup_imagination_train(self, batch_size, sample_obs, batch_length):
         # if start to step using imagination, initialize the buffer and reset kv_cache
@@ -1653,8 +1599,8 @@ class WorldModel_normal_small_test(nn.Module):
         self.logcosh_loss = log_cosh_loss()
         self.ce_loss = nn.CrossEntropyLoss()
         self.bce_with_logits_loss_func = nn.BCEWithLogitsLoss()
-        self.kl_div_loss = KLDivLoss(free_bits = 1.0)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3,weight_decay=1e-5)
+        self.kl_div_loss = KLDivLoss_normal(free_bits = 1.0)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-3,weight_decay=1e-5)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1500, gamma=0.1)
 
@@ -1665,7 +1611,6 @@ class WorldModel_normal_small_test(nn.Module):
             last_dist_feat = dist_feat[:, -1:]
             mu_prior, var_prior = self.dist_head_vae.forward_prior_vae(last_dist_feat)
             prior_flattened_sample = self.reparameterize(mu_prior, var_prior)
-            # prior_flattened_sample = self.flatten_sample(prior_sample)
         return prior_flattened_sample, last_dist_feat
     def reparameterize(self, mu, log_var):
         # Compute the standard deviation from the log variance
@@ -1717,9 +1662,6 @@ class WorldModel_normal_small_test(nn.Module):
         dof_vel = dof_vel / 0.05
         torques = 20*(actions_scaled - dof_pos_diff) - 0.5*dof_vel
         return torques
-
-    def flatten_sample(self, sample):
-        return rearrange(sample, "B L K C -> B L (K C)")
 
     def setup_imagination_train(self, batch_size, sample_obs, batch_length):
         # if start to step using imagination, initialize the buffer and reset kv_cache

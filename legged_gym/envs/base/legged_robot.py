@@ -272,7 +272,7 @@ class LeggedRobot(BaseTask):
                 friction_range = self.cfg.domain_rand.friction_range
                 num_buckets = 64
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
-                friction_buckets = torch_rand_float(friction_range[0], friction_range[1], (num_buckets,1), device='cpu')
+                friction_buckets = torch_rand_float(friction_range[0], friction_range[1], (num_buckets,1), device=self.device)
                 self.friction_coeffs = friction_buckets[bucket_ids]
 
             for s in range(len(props)):
@@ -283,7 +283,7 @@ class LeggedRobot(BaseTask):
                 restitutions_range = self.cfg.domain_rand.restitutions_range
                 num_buckets = 64
                 bucket_ids = torch.randint(0, num_buckets, (self.num_envs, 1))
-                restitution_buckets = torch_rand_float(restitutions_range[0], restitutions_range[1], (num_buckets,1), device='cpu')
+                restitution_buckets = torch_rand_float(restitutions_range[0], restitutions_range[1], (num_buckets,1), device=self.device)
                 self.restitution_coeffs = restitution_buckets[bucket_ids]
 
             for s in range(len(props)):
@@ -936,6 +936,10 @@ class LeggedRobot(BaseTask):
     def _reward_orientation(self):
         # Penalize non flat base orientation
         return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+    
+    def _reward_similar_to_default(self):
+        # Penalize joint poses far away from default pose
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
 
     # =================non-paper rewards==================
     def _reward_base_height(self):

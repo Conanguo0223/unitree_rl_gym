@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel_normal, WorldModel
+from rsl_rl.modules.sub_models.world_models import WorldModel
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq

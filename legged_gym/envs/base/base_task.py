@@ -27,6 +27,8 @@ class BaseTask():
         self.graphics_device_id = self.sim_device_id
         if self.headless == True:
             self.graphics_device_id = -1
+            # if want to record video has to set graphics device
+            self.graphics_device_id = self.sim_device_id
 
         self.num_envs = cfg.env.num_envs
         self.num_obs = cfg.env.num_observations
@@ -88,7 +90,7 @@ class BaseTask():
     def step(self, actions):
         raise NotImplementedError
 
-    def render(self, sync_frame_time=True):
+    def render(self, sync_frame_time=False):
         if self.viewer:
             # check for window closed
             if self.gym.query_viewer_has_closed(self.viewer):

@@ -261,7 +261,7 @@ class ReplayBuffer_seq_new():
         reward = self.reward_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
         termination = self.termination_buffer[indices[:, None], time_indices[:, None] + torch.arange(batch_length, device=to_device)]
 
-        return obs, priv_obs, action, reward, termination
+        return obs, priv_obs, action, reward.unsqueeze(-1), termination.unsqueeze(-1)
 
     def append(self, obs, priv_obs, action, reward, termination):
         # obs/nex_obs: torch Tensor

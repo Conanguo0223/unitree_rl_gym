@@ -176,8 +176,8 @@ class OnPolicy_WM_Runner_Val:
                                                         self.num_critic_obs,
                                                         self.env.num_actions,
                                                         **self.policy_cfg).to(self.device)
-        load_world_model = True
-        load_policy_model = True
+        load_world_model = False
+        load_policy_model = False
 
         if load_world_model:
             self.worldmodel.load_state_dict(torch.load("/home/aipexws1/conan/unitree_rl_gym/logs/rough_go2_TWM_train/May20_23-25-41_/world_model_4999.pt"))

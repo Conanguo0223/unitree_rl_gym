@@ -64,13 +64,10 @@ class StochasticTransformerKVCache(nn.Module):
         ])
         self.layer_norm = nn.LayerNorm(feat_dim, eps=1e-6)  # TODO: check if this is necessary
 
-    def forward(self, samples, action, mask):
+    def forward(self, samples, mask):
         '''
         Normal forward pass
         '''
-        # action is not one hot
-        # action = F.one_hot(action.long(), self.action_dim).float() 
-        # feats = self.stem(torch.cat([samples, action], dim=-1))
         feats = self.stem(samples)
         feats = self.position_encoding(feats)
         feats = self.layer_norm(feats)
@@ -88,7 +85,7 @@ class StochasticTransformerKVCache(nn.Module):
         for layer in self.layer_stack:
             self.kv_cache_list.append(torch.zeros(size=(batch_size, 0, self.feat_dim), dtype=dtype, device="cuda"))
 
-    def forward_with_kv_cache(self, samples, action):
+    def forward_with_kv_cache(self, samples):
         '''
         Forward pass with kv_cache, cache stored in self.kv_cache_list
         '''
@@ -99,8 +96,6 @@ class StochasticTransformerKVCache(nn.Module):
                 self.kv_cache_list[i] = self.kv_cache_list[i][:, 1:, :]
         mask = get_vector_mask(self.kv_cache_list[0].shape[1]+1, samples.device)
 
-        # action = F.one_hot(action.long(), self.action_dim).float()
-        # feats = self.stem(torch.cat([samples, action], dim=-1))
         feats = self.stem(samples)
         feats = self.position_encoding.forward_with_position(feats, position=self.kv_cache_list[0].shape[1])
         feats = self.layer_norm(feats)
@@ -165,6 +160,23 @@ class StochasticTransformerKVCache_small(nn.Module):
             feats, attn = layer(feats, feats, feats, mask)
 
         return feats
+    
+    def forward_with_attention(self, samples, mask):
+        '''
+        Normal forward pass
+        '''
+        # action is not one hot
+        # action = F.one_hot(action.long(), self.action_dim).float() 
+        # feats = self.stem(torch.cat([samples, action], dim=-1))
+        feats = self.stem(samples)
+        feats = self.position_encoding(feats)
+        feats = self.layer_norm(feats)
+        attns = []
+        for layer in self.layer_stack:
+            feats, attn = layer(feats, feats, feats, mask)
+            attns.append(attn)
+        attn = torch.stack(attns, dim=0)
+        return feats,attn
 
     def reset_kv_cache_list(self, batch_size, dtype, device):
         '''

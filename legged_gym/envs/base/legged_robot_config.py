@@ -111,8 +111,9 @@ class LeggedRobotCfg(BaseConfig):
             dof_acc = -2.5e-7
             action_rate = -0.01
             feet_air_time =  0.5 # unobservable
-            collision = -1. # unobservable
+            collision = 0.0 # unobservable # remove since not observable
             orientation = -5.
+            similar_to_default = -0.1 # penalize deviation from default joint angles # just to test
             # non-paper rewards
             termination = -0.0
             dof_vel = -0.
@@ -214,6 +215,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         run_name = ''
         # load and resume
         resume = False
+        load_baseline = False
         load_run = -1 # -1 = last run
         checkpoint = -1 # -1 = last saved model
         resume_path = None # updated from load_run and chkpt
