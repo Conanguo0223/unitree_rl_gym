@@ -39,7 +39,7 @@ from einops import rearrange
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent
 from rsl_rl.env import VecEnv
-from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal_small_test, WorldModel_normal_small, WorldModel_no_rew_term
+from rsl_rl.modules.sub_models.world_models import WorldModel, WorldModel_normal_small_torch, WorldModel_normal_small, WorldModel_no_rew_term
 from rsl_rl.modules.sub_models.functions_losses import symexp
 # from rsl_rl.modules.sub_models.agents import ActorCriticAgent
 from rsl_rl.modules.sub_models.replay_buffer import ReplayBuffer, ReplayBuffer_seq, ReplayBuffer_seq_new
@@ -61,7 +61,8 @@ def build_world_model(in_channels, action_dim, wm_cfg, privileged_dim):
     ).cuda()
 
 def build_world_model_normal_small(in_channels, wm_cfg, privileged_dim):
-    return WorldModel_normal_small(
+    # return WorldModel_normal_small(
+    return WorldModel_normal_small_torch(
         in_channels=in_channels,
         decoder_out_channels=privileged_dim,# remove actions (12) and commands (3)
         transformer_max_length = wm_cfg["max_length"],
@@ -91,7 +92,7 @@ class OnPolicy_WM_Runner_train:
                  train_cfg,
                  log_dir=None,
                  device='cpu'):
-
+        # get configurations
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
